@@ -4,6 +4,17 @@
 **Predecessor evidence:** `lilytorch/milestones/force_readout_agreement_handoff.md`
 (§§1-11; §10 is the current state)
 
+> **⚠️ DELTAH RETIRED (2026-07-19).** Everything below that discusses `deltaH` /
+> `force_submethod == 1` is **historical**. The deltaH eulerian submethod and the legacy standalone
+> **python** eulerian force path have been deleted (CUDA + CPU + configs + tests). The union `ndelta`
+> readout (`force_submethod=0`, `solver.force_link_normal="union"`, the default) subsumes deltaH's
+> two-phase gauge fix — verified by `validation/two_phase_3d/band_treatment_check.py`
+> (`kernel_ndelta_gauge`: const-p net ≈ 0, hydrostatic → vertical-only) and a live amphibious_pool
+> two-phase smoke. `sm2` (`force_submethod=2`, `force_link_normal="body"`) remains as an analysis-only
+> per-link-normal variant, gauge-unsafe and **forbidden with the two-phase solver**. `force_submethod`
+> now has an intentional numbering gap (0, then 2). Read the deltaH numbers below as the record of
+> *why* the union path was trusted to replace it, not as a live option.
+
 Read this file first, then §10 of the milestone doc for the raw evidence. **Rebuild the native
 extension before anything else** (`python setup.py build_ext --inplace`) — the op set moves with
 refactors, and a stale `_C.so` silently hides bugs (it hid two for a whole session).
@@ -377,6 +388,85 @@ error that is not the dominant one on this geometry.
    which the slab table says restores the measure exactly (`t ≥ eps_body → 1.000`). **Cheap test that
    nobody has run: sweep `eps_multiplier` (the delta WIDTH — trap #4 no longer applies, B1 decoupled
    it from the offset) and watch `A_coarea/A_tri` → 1 and the `(0,0)` pressure ratio → 1.**
+
+### B1c. ROOT CAUSE FOUND AND VALIDATED (2026-07-17) — `ndelta` is broken on multi-link bodies
+
+`python -m lilytorch.examples.force_benchmarks.fish_geometry_oracle` (~20 s, needs `snap_lagr.pt`).
+
+**THE GAP THIS CLOSED.** Every force oracle in this repo ran on a **sphere** — one convex analytic
+body, `|∇φ|=1`, **no joints**. The fish is a 16-link **mesh** body, union SDF, sheet-thin. **Nobody
+had ever run an oracle on it**, so every fish number was eul-vs-lag (relative) and the lagrangian
+was the reference only because it is exact *on spheres*. `fish_geometry_oracle.py` takes the frozen
+snapshot's real geometry and swaps the fluid for an analytic field with an exact answer
+(same two cases as `oracle_native_three_way.py`: `p=−G·x → F_p=G·V`; `u_x=c·y² → F_v=2νρc·V`, both
+origin-independent). It measures **readout/geometry error with ZERO band contamination** — the half
+we had none of.
+
+| readout, fish geometry, **clean analytic field** | `F_p`/exact | `F_v`/exact |
+|---|---|---|
+| **lagrangian** | **0.997** | **0.997** |
+| eulerian `ndelta` order1 — **THE PRODUCTION SETTING** | **1.808** | **1.634** |
+| eulerian `ndelta` order2 | 1.395 | 1.391 |
+| eulerian `deltaH` order1 | **0.955** | 1.634 |
+| eulerian `deltaH` order2 | **0.955** | 1.391 |
+
+**1. THE LAGRANGIAN IS EXACT ON THE FISH GEOMETRY — 0.997 in BOTH channels**, and 0.997 is exactly
+`V_tri/V_sdf = 0.9969`, i.e. it recovers *its own* enclosed volume to machine precision. **Its
+reference status is now earned on this geometry, not just on spheres.** That was the load-bearing
+assumption nobody had checked; it holds.
+
+**2. `ndelta` — THE DEFAULT — IS BROKEN ON MULTI-LINK BODIES.** Per-link pressure forces are not
+merely mis-scaled, they have **WRONG SIGNS** (per-link eul/lag: −0.204, −0.166, +0.109, +6.44,
++11.73). **Mechanism:** `ndelta` partitions the band per link using **each link's own SDF**, so at a
+joint that link's own iso-surface passes through the **joint interface — a surface that is INTERIOR
+to the union and does not physically exist**. Each link reads a spurious contribution there.
+`deltaH`'s softmin union-∂H partition exists for exactly this and repairs it: **1.395 → 0.955**.
+Spheres have no joints, which is why every prior oracle missed it.
+
+**3. `deltaH` = 0.955 = `<V>_δ/V(0)` = 0.9552 — predicted to 3 d.p., so the mechanism is understood.**
+By the divergence theorem `∮_{φ=s} p·n dS = G·V(φ<s)`, and coarea turns the eulerian band integral
+into `G·∫δ(s)V(φ<s)ds = G·<V>_δ`. So the eulerian's *correct* form measures a **delta-weighted
+average of the ENCLOSED VOLUME**, not an area. On this fish that average is 4.5% low. **This is a
+small, quantified, irreducible band bias** — it is what an eulerian readout *is*.
+
+**4. THE VISCOUS CHANNEL IS BROKEN FOR BOTH SUBMETHODS AND `deltaH` DOES NOT FIX IT** —
+`deltaH` viscous is **bit-identical** to `ndelta` viscous (1.64351e-10 both), confirming §C.
+Note `ndelta` order2 gives **1.395 (p) and 1.391 (v) — the same factor**: it is the *same*
+multi-link partition error in both channels. Pressure gets rescued by `deltaH`; **viscous never got
+the union treatment.**
+
+**5. ⇒ THE ZEBRAFISH STORY, COMPLETE.** Production runs `force_method: eulerian` and **never sets
+`force_submethod`**, so it gets **`ndelta`** (`solver.py:407` default) at `delta_order=1` — the worst
+cell in the table (1.808 / 1.634). Even at the best eulerian setting (`deltaH`+order2) the fish gets
+**pressure 0.955 but viscous 1.391**. That asymmetry is the mechanism: **thrust ≈ right, drag 39%
+over ⇒ the thrust/drag balance is broken ⇒ the wrong swim speed.** It also explains §B1b's
+"coincidental cancellation" — that cancellation is between *two broken channels*.
+
+**6. `delta_order=2` matters far more on the fish than §10.9 measured** — 1.808→1.395 (p),
+1.634→1.391 (v). The fish is a **mesh** body with `mean|∇φ| = 0.82`, and order1 omits the coarea
+`|∇φ|` multiply, carrying an extra `1/|∇φ| ≈ 1.30`. (Measured order1/order2 = 1.296.) Inert on
+analytical bodies, which is why it hid.
+
+#### ⇒ THE REAL FIX (supersedes §B1a step 3 "shift the sample, not the delta")
+
+**Port `deltaH`'s union-∂H partition to the VISCOUS channel.** That is the one change the evidence
+supports: it is already proven to work on the pressure channel of this exact geometry (1.395→0.955),
+and the viscous channel is failing by the *same* factor for the *same* reason. Gate it on this
+oracle — it has an exact answer and runs in ~20 s.
+**Do NOT start "shift the sample, not the delta"**: it targets the offset Jacobian, which is 1.169 on
+this fish (§B1b) and not the problem.
+
+#### ⚠ RETRACTED by this section (my own, from §B1b — recorded so nobody re-derives them)
+
+- **"the eulerian's measure deficit (`A_coarea/A_tri` = 0.636) causes the force error"** — **WRONG,
+  and it had the sign backwards.** The pressure/viscous forces here are **VOLUME** integrals by the
+  divergence theorem, not area integrals, so an *area* deficit does not drive them. The 0.636 is a
+  true fact about `∫δ dV` and a **red herring for forces**.
+- **"a ~2.09× integrand over-read (BDIM-contaminated interior)"** — **DEAD.** It was arithmetic
+  (1.327/0.636), never measured, and the oracle has **no contamination at all** yet still over-reads.
+- **"sheet truncation biases the enclosed-volume average UP"** — **DEAD**, tested: `<V>_δ/V(0)` =
+  **0.955**, i.e. slightly *down*. The model was right but describes `deltaH`; `ndelta` never
+  computed the union integral in the first place.
 
 #### ⚠️ Then redo the core comparison — STILL TO DO, and read §C "the two offset laws" first
 

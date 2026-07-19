@@ -365,36 +365,15 @@ class TwoPhaseSolver(FluidSolver):
         # approximation.  Default ON; set to False to restore legacy behaviour.
         self._air_transparent_body = bool(
             cfg.get("air_transparent_body", True))
-        # Partial-Heaviside pressure force (the ``n·δ -> ∂_iH`` weight change).
-        # The eulerian band integral ``F_i = -Σ p n_i δ_ε`` forms the analytic
-        # normal n and the delta kernel separately, so the discrete sum does NOT
-        # satisfy summation-by-parts and a hydrostatic baseline leaks in (∝depth,
-        # see gauge_anchor notes).  Replacing the weight by the DISCRETE gradient
-        # of the smooth body Heaviside makes it satisfy discrete SBP
-        # ``Σ p ∂_iH = -Σ (∂_i p) H``, so a hydrostatic field (∂_x p = 0) gives
-        # Fx -> 0 exactly while buoyancy (∂_z p = ρg) survives.
-        #
-        # The force density ``f_i = -p ∂_iH_ε(φ_union)`` is taken over the UNION
-        # SDF (one closed surface, no interior inter-link seams that would break
-        # the SBP cancellation) and split to links by a softmin partition of
-        # unity over the per-link SDFs (Σ_b w_b ≡ 1, so Σ_b F[b] == union force,
-        # and each link still gets its own force+torque for MuJoCo).
-        # ``partial_heaviside_blend_cells`` sets the softmin scale tau =
-        # blend_cells * h (default 1.5 cells).  Viscous channels untouched.
-        # Needs per-body SDFs (standalone python-style bodies); the streaming
-        # equivalent is ``solver.force_submethod = "deltaH"``.  Opt-in;
-        # supersedes the gauge anchors when set.
-        self._partial_heaviside_forces = bool(
-            cfg.get("partial_heaviside_forces", False))
-        self._ph_blend_cells = float(cfg.get("partial_heaviside_blend_cells", 1.5))
+        # The old python-only partial-Heaviside pressure readout has been
+        # removed: two-phase runs now go through the native streaming force op,
+        # whose default union-∂H readout (force_link_normal='union') already
+        # carries the summation-by-parts gauge fix for BOTH channels.
         flags = []
         if self._rho_solid is not None:
             flags.append(f"three-phase rho_solid={self._rho_solid}")
         if self._air_transparent_body:
             flags.append("air-transparent-body")
-        if self._partial_heaviside_forces:
-            flags.append(
-                "partial-Heaviside (∂H) pressure forces [union+partition]")
         if self._alpha_exclude_body:
             flags.append("body-aware alpha init (carve"
                          + ("+volume-compensate)" if cfg.get(
@@ -777,109 +756,6 @@ class TwoPhaseSolver(FluidSolver):
             cb.sdf_vals = torch.stack([b.sdf_val for b in cb.bodies])
         base = _forces.forces_method2_3d if fn3d else _forces.forces_method2
         base(self, *vels, p, iteration)                # REAL pressure → emergent
-        if self._partial_heaviside_forces:
-            # The base routine already computed the (p-independent) viscous loads;
-            # REPLACE its pressure force/torque with the union-∂H partition integral.
-            self._apply_partition_heaviside(fn3d, p)
-
-    @staticmethod
-    def _heaviside_smooth(phi, eps):
-        """Smooth Heaviside = exact antiderivative of the cosine delta the base
-        force uses (``δ = (1+cos(πφ/ε))/(2ε)``): 0 for φ≤-ε, 1 for φ≥ε, else
-        ``½(1 + φ/ε + sin(πφ/ε)/π)``.  H(φ>0)=1 (fluid side), so ∂H points
-        outward -> matches the n·δ sign convention (pforce = -p n)."""
-        x = (phi / eps).clamp(-1.0, 1.0)
-        return 0.5 * (1.0 + x + torch.sin(torch.pi * x) / torch.pi)
-
-    def _apply_partition_heaviside(self, fn3d, p):
-        """THE FIX: union-∂H force density distributed to links by a softmin
-        partition of unity on the per-link SDFs.
-
-        Force density ``f_i = -p ∂_iH_ε(φ_union)`` is computed from the UNION SDF
-        (one closed surface, NO interior inter-link seams -> SBP cancels the
-        hydrostatic baseline, as the union diagnostic proved).  It is split to
-        links by weights ``w_b = softmax(-φ_b / τ)`` (τ = blend_cells·h): at a
-        union-surface cell the nearest link (smallest φ_b) owns the patch; at a
-        seam two abutting links share it smoothly.  Σ_b w_b ≡ 1, so
-        ``Σ_b F[b] == union force`` exactly (validated in tests/harness).  Each
-        link's torque is about its OWN com.  Cropped to the union AABB for speed;
-        per-link SDFs from _sdf_sparse / sdf_vals (python path only)."""
-        cb = self.composite_body
-        if getattr(cb, "_kernel_step", None) is not None:
-            raise RuntimeError(
-                "partial_heaviside_forces requires per-body SDFs (standalone "
-                "python-style bodies; the rigid streaming update keeps only "
-                "the union SDF); use solver.force_submethod='deltaH' on the "
-                "streaming path.")
-        B = len(cb.bodies)
-        h = self.h
-        hD = self.h3 if fn3d else self.h2
-        eps0 = cb.bodies[0].eps
-        tau = max(self._ph_blend_cells * h, 1e-9)
-        _d = torch.float64
-        _FAR = 1e6
-        ndim = 3 if fn3d else 2
-
-        # union force density f_i = -p ∂_iH(φ_union) on the full grid
-        sdf_u = cb.sdf_val
-        H = self._heaviside_smooth(sdf_u, eps0)
-        gH = [torch.gradient(H, spacing=h, dim=d, edge_order=2)[0]
-              for d in range(ndim)]
-        fdens = [-p * g for g in gH]
-
-        # union AABB over all per-link sub-blocks (+halo); crop everything to it
-        use_sparse = (hasattr(cb, "_sdf_sparse") and cb._sdf_sparse
-                      and cb._sdf_sparse[0] is not None)
-        lo = [0] * ndim
-        hi = list(sdf_u.shape)
-        aabbs = None
-        if use_sparse and all(a is not None for a, _ in cb._sdf_sparse):
-            aabbs = [a for a, _ in cb._sdf_sparse]
-            lo = [min(a[2 * d] for a in aabbs) for d in range(ndim)]
-            hi = [max(a[2 * d + 1] for a in aabbs) for d in range(ndim)]
-            halo = 2
-            lo = [max(0, lo[d] - halo) for d in range(ndim)]
-            hi = [min(sdf_u.shape[d], hi[d] + halo) for d in range(ndim)]
-        sl = tuple(slice(lo[d], hi[d]) for d in range(ndim))
-        cshape = tuple(hi[d] - lo[d] for d in range(ndim))
-
-        # per-link SDF stack on the crop (_FAR outside each link's AABB)
-        sdf_stack = torch.full((B, *cshape), _FAR, device=p.device, dtype=p.dtype)
-        for b in range(B):
-            if aabbs is not None:
-                a = aabbs[b]
-                sub = cb._sdf_sparse[b][1]
-                lsl = tuple(slice(a[2 * d] - lo[d], a[2 * d + 1] - lo[d])
-                            for d in range(ndim))
-                sdf_stack[b][lsl] = sub
-            else:
-                sdf_b = (cb.sdf_vals[b] if getattr(cb, "sdf_vals", None) is not None
-                         else cb.bodies[b].sdf_val)
-                sdf_stack[b] = sdf_b[sl]
-        # softmin partition of unity over links (sums to 1 over b)
-        w = torch.softmax(-sdf_stack / tau, dim=0)
-
-        fdc = [f[sl] for f in fdens]
-        coords = [cb.X[sl], cb.Y[sl]] + ([cb.Z_grid[sl]] if fn3d else [])
-        zero = p.new_zeros(())
-
-        def load(t):                       # density field -> reduced scalar load
-            return t.to(_d).sum().to(p.dtype) * hD
-
-        for b in range(B):
-            wb = w[b]
-            com = cb.bodies[b].com_pos
-            # weighted force density / lever arm per axis; pad z with 0 in 2-D so
-            # the cross product is dimension-agnostic (Tx, Ty then vanish exactly)
-            f = [wb * fdc[d] for d in range(ndim)] + [zero] * (3 - ndim)
-            r = [coords[d] - com[d] for d in range(ndim)] + [zero] * (3 - ndim)
-            self.pressure_force_x[b] = load(f[0])
-            self.pressure_force_y[b] = load(f[1])
-            self.pressure_force_z[b] = load(f[2])
-            # torque density r x f about the link's own com
-            self.pressure_force_ang_x[b] = load(r[1] * f[2] - r[2] * f[1])
-            self.pressure_force_ang_y[b] = load(r[2] * f[0] - r[0] * f[2])
-            self.pressure_force_ang_z[b] = load(r[0] * f[1] - r[1] * f[0])
 
     def forces_method2(self, u, v, p, iteration):
         self._two_phase_forces(False, (u, v), p, iteration)

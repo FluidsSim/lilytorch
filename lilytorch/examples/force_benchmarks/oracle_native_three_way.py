@@ -1,16 +1,17 @@
 """Compare all THREE force readouts against an exact physical oracle.
 
-  1. eulerian / ndelta   (force_submethod=0)
-  2. eulerian / deltaH   (force_submethod=1)
+  1. eulerian / ndelta   (force_submethod=0, union-∇H)
+  2. eulerian / sm2      (force_submethod=2, union coarea × per-body normal)
   3. lagrangian
 
 Same two analytic cases as oracle_forces.py, on the same sphere:
   A) p = -G*x, u = 0            -> F_p = G*V          (exact, divergence thm)
   B) u_x = c*y^2, p = 0         -> F_v = 2*nu*rho*c*V (exact, divergence thm)
 
-deltaH lives ONLY in the native streaming op (the python fallback in
-forces_method2_3d has no deltaH branch), so this drives
-``streaming_sdf_forces_post_3d`` directly with a hand-built single-body scene.
+Both eulerian readouts live ONLY in the native streaming op (the python
+fallback is gone), so this drives ``streaming_sdf_forces_post_3d`` directly
+with a hand-built single-body scene.  On a single body sm2's per-body normal
+coincides with the union normal, so it should match ndelta here.
 CPU/float64 for accuracy; the CPU twin carries the same delta convention as the
 CUDA kernel (verified: streaming_sdf_cpu.cpp:697 == streaming_sdf.cu:404).
 
@@ -110,7 +111,7 @@ def run(N, eps_mult):
     uB, pB = CSH * Y ** 2, z
 
     res = {}
-    for name, sm in (("ndelta", 0), ("deltaH", 1)):
+    for name, sm in (("ndelta", 0), ("sm2", 2)):
         _, fp = eulerian(sc, sm, uA, z.clone(), z.clone(), pA)
         fv, _ = eulerian(sc, sm, uB, z.clone(), z.clone(), pB)
         res[name] = (fp, fv)
@@ -127,8 +128,8 @@ if __name__ == "__main__":
     print(f"exact F_p = {fp_true:.6e}   exact F_v = {fv_true:.6e}")
     print()
     hdr = (f"{'R/h':>5} {'eps_m':>6} | {'ndelta F_p':>11} {'r':>5} "
-           f"{'deltaH F_p':>11} {'r':>5} {'lagr F_p':>11} {'r':>5} | "
-           f"{'ndelta F_v':>11} {'r':>5} {'deltaH F_v':>11} {'r':>5} "
+           f"{'sm2 F_p':>11} {'r':>5} {'lagr F_p':>11} {'r':>5} | "
+           f"{'ndelta F_v':>11} {'r':>5} {'sm2 F_v':>11} {'r':>5} "
            f"{'lagr F_v':>11} {'r':>5}")
     print(hdr); print("-" * len(hdr))
     for N in (32, 48, 64, 96):
@@ -136,9 +137,9 @@ if __name__ == "__main__":
         for em in (1.0, 2.0):
             r = run(N, em)
             row = f"{R/h:>5.1f} {em:>6.1f} |"
-            for key in ("ndelta", "deltaH", "lagrangian"):
+            for key in ("ndelta", "sm2", "lagrangian"):
                 row += f" {r[key][0]:>11.4e} {r[key][0]/fp_true:>5.2f}"
             row += " |"
-            for key in ("ndelta", "deltaH", "lagrangian"):
+            for key in ("ndelta", "sm2", "lagrangian"):
                 row += f" {r[key][1]:>11.4e} {r[key][1]/fv_true:>5.2f}"
             print(row)

@@ -603,190 +603,139 @@ void streaming_sdf_forces_post_3d_cpu(
         const scalar_t* pp=p.data_ptr<scalar_t>();
         const scalar_t* nr=nu_rho_field.data_ptr<scalar_t>();
         double* outp=out.data_ptr<double>();
-        const scalar_t inv_h=(scalar_t)(1.0/h_grid), eps_b=(scalar_t)eps_body;
+        const scalar_t inv_h=(scalar_t)(1.0/h_grid);
         const scalar_t off_pres=(scalar_t)sample_offset_pressure;
         const scalar_t off_visc=(scalar_t)sample_offset_friction;
-        const scalar_t pi=(scalar_t)3.141592653589793, inv_2eps=(scalar_t)0.5/eps_b, pi_eb=pi/eps_b;
-        // Union of the two delta supports — see eulerian_forces.cu.
-        const scalar_t band_lo=(off_pres<off_visc?off_pres:off_visc)-eps_b;
-        const scalar_t band_hi=(off_pres>off_visc?off_pres:off_visc)+eps_b;
+        const scalar_t pi=(scalar_t)3.141592653589793;
         const double h3d=(double)h3;
         auto S=[&](int i,int j,int k)->scalar_t{return sdf[((int64_t)i*Ngy+j)*Ngz+k];};
+        // ---- submethod 0 (union grad-H direction) / 2 (per-body analytic
+        //      normal): the UNIFIED union-measure + partition readout.  Mirrors
+        //      forces_post_union_blend_3d_kernel in cuda/eulerian_forces.cu. ----
+        const bool body_normal = (force_submethod == 2);
+        const scalar_t inv_eps = (scalar_t)(1.0/eps_body);
+        const scalar_t blend_eps = (scalar_t)ph_tau;
+        const bool soft = blend_eps > (scalar_t)0;
+        const scalar_t inv_blend = soft ? ((scalar_t)1/blend_eps) : (scalar_t)0;
+        auto Hoff=[&](int i,int j,int k,scalar_t off)->scalar_t{
+            scalar_t x=(S(i,j,k)-off)*inv_eps; x=x<(scalar_t)-1?(scalar_t)-1:(x>(scalar_t)1?(scalar_t)1:x);
+            return (scalar_t)0.5*((scalar_t)1+x+std::sin(pi*x)/pi); };
+        auto hgrad=[&](int i,int j,int k,scalar_t off,scalar_t& gX,scalar_t& gY,scalar_t& gZ){
+            gX=0;gY=0;gZ=0;
+            if(Ngx>=3){ if(i==0) gX=((scalar_t)(-3)*Hoff(0,j,k,off)+(scalar_t)4*Hoff(1,j,k,off)-Hoff(2,j,k,off))*(scalar_t)0.5*inv_h; else if(i==Ngx-1) gX=((scalar_t)3*Hoff(Ngx-1,j,k,off)-(scalar_t)4*Hoff(Ngx-2,j,k,off)+Hoff(Ngx-3,j,k,off))*(scalar_t)0.5*inv_h; else gX=(Hoff(i+1,j,k,off)-Hoff(i-1,j,k,off))*(scalar_t)0.5*inv_h; } else if(Ngx==2) gX=(Hoff(1,j,k,off)-Hoff(0,j,k,off))*inv_h;
+            if(Ngy>=3){ if(j==0) gY=((scalar_t)(-3)*Hoff(i,0,k,off)+(scalar_t)4*Hoff(i,1,k,off)-Hoff(i,2,k,off))*(scalar_t)0.5*inv_h; else if(j==Ngy-1) gY=((scalar_t)3*Hoff(i,Ngy-1,k,off)-(scalar_t)4*Hoff(i,Ngy-2,k,off)+Hoff(i,Ngy-3,k,off))*(scalar_t)0.5*inv_h; else gY=(Hoff(i,j+1,k,off)-Hoff(i,j-1,k,off))*(scalar_t)0.5*inv_h; } else if(Ngy==2) gY=(Hoff(i,1,k,off)-Hoff(i,0,k,off))*inv_h;
+            if(Ngz>=3){ if(k==0) gZ=((scalar_t)(-3)*Hoff(i,j,0,off)+(scalar_t)4*Hoff(i,j,1,off)-Hoff(i,j,2,off))*(scalar_t)0.5*inv_h; else if(k==Ngz-1) gZ=((scalar_t)3*Hoff(i,j,Ngz-1,off)-(scalar_t)4*Hoff(i,j,Ngz-2,off)+Hoff(i,j,Ngz-3,off))*(scalar_t)0.5*inv_h; else gZ=(Hoff(i,j,k+1,off)-Hoff(i,j,k-1,off))*(scalar_t)0.5*inv_h; } else if(Ngz==2) gZ=(Hoff(i,j,1,off)-Hoff(i,j,0,off))*inv_h;
+        };
+        auto sgrad=[&](int i,int j,int k,scalar_t& gX,scalar_t& gY,scalar_t& gZ){
+            gX=0;gY=0;gZ=0;
+            if(Ngx>=3){ if(i==0) gX=((scalar_t)(-3)*S(0,j,k)+(scalar_t)4*S(1,j,k)-S(2,j,k))*(scalar_t)0.5*inv_h; else if(i==Ngx-1) gX=((scalar_t)3*S(Ngx-1,j,k)-(scalar_t)4*S(Ngx-2,j,k)+S(Ngx-3,j,k))*(scalar_t)0.5*inv_h; else gX=(S(i+1,j,k)-S(i-1,j,k))*(scalar_t)0.5*inv_h; } else if(Ngx==2) gX=(S(1,j,k)-S(0,j,k))*inv_h;
+            if(Ngy>=3){ if(j==0) gY=((scalar_t)(-3)*S(i,0,k)+(scalar_t)4*S(i,1,k)-S(i,2,k))*(scalar_t)0.5*inv_h; else if(j==Ngy-1) gY=((scalar_t)3*S(i,Ngy-1,k)-(scalar_t)4*S(i,Ngy-2,k)+S(i,Ngy-3,k))*(scalar_t)0.5*inv_h; else gY=(S(i,j+1,k)-S(i,j-1,k))*(scalar_t)0.5*inv_h; } else if(Ngy==2) gY=(S(i,1,k)-S(i,0,k))*inv_h;
+            if(Ngz>=3){ if(k==0) gZ=((scalar_t)(-3)*S(i,j,0)+(scalar_t)4*S(i,j,1)-S(i,j,2))*(scalar_t)0.5*inv_h; else if(k==Ngz-1) gZ=((scalar_t)3*S(i,j,Ngz-1)-(scalar_t)4*S(i,j,Ngz-2)+S(i,j,Ngz-3))*(scalar_t)0.5*inv_h; else gZ=(S(i,j,k+1)-S(i,j,k-1))*(scalar_t)0.5*inv_h; } else if(Ngz==2) gZ=(S(i,j,1)-S(i,j,0))*inv_h;
+        };
+        auto trigrad=[&](const scalar_t* F,int Mx,int My,int Mz,scalar_t bx0,scalar_t by0,scalar_t bz0,scalar_t idx,scalar_t idy,scalar_t idz,scalar_t xq,scalar_t yq,scalar_t zq,scalar_t& gbx,scalar_t& gby,scalar_t& gbz)->scalar_t{
+            scalar_t tx=(xq-bx0)*idx, ty=(yq-by0)*idy, tz=(zq-bz0)*idz;
+            tx=std::max((scalar_t)0,std::min(tx,(scalar_t)(Mx-1))); ty=std::max((scalar_t)0,std::min(ty,(scalar_t)(My-1))); tz=std::max((scalar_t)0,std::min(tz,(scalar_t)(Mz-1)));
+            int ix=(int)tx; if(ix>Mx-2) ix=Mx-2; int iy=(int)ty; if(iy>My-2) iy=My-2; int iz=(int)tz; if(iz>Mz-2) iz=Mz-2;
+            const scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy, fz=tz-(scalar_t)iz;
+            const int s2=Mz, s1=My*Mz, base=ix*s1+iy*s2+iz;
+            const scalar_t c000=F[base],c001=F[base+1],c010=F[base+s2],c011=F[base+s2+1],c100=F[base+s1],c101=F[base+s1+1],c110=F[base+s1+s2],c111=F[base+s1+s2+1];
+            const scalar_t omfx=(scalar_t)1-fx,omfy=(scalar_t)1-fy,omfz=(scalar_t)1-fz;
+            const scalar_t val=omfx*(omfy*(omfz*c000+fz*c001)+fy*(omfz*c010+fz*c011))+fx*(omfy*(omfz*c100+fz*c101)+fy*(omfz*c110+fz*c111));
+            const scalar_t dfx=omfy*(omfz*(c100-c000)+fz*(c101-c001))+fy*(omfz*(c110-c010)+fz*(c111-c011));
+            const scalar_t dfy=omfx*(omfz*(c010-c000)+fz*(c011-c001))+fx*(omfz*(c110-c100)+fz*(c111-c101));
+            const scalar_t dfz=omfx*(omfy*(c001-c000)+fy*(c011-c010))+fx*(omfy*(c101-c100)+fy*(c111-c110));
+            gbx=dfx*idx; gby=dfy*idy; gbz=dfz*idz; return val;
+        };
+        auto phi_c=[&](int c,int i,int j,int k)->scalar_t{
+            const scalar_t* Fc=F_ptr+F_off[c]; const int Mxc=(int)shapes[c*3],Myc=(int)shapes[c*3+1],Mzc=(int)shapes[c*3+2];
+            const scalar_t* Mc=meta+c*10; const scalar_t* Kc=kin_ptr+c*21;
+            const scalar_t dxc=gx_ptr[i]-Kc[9],dyc=gy_ptr[j]-Kc[10],dzc=gz_ptr[k]-Kc[11];
+            const scalar_t bxc=Kc[0]*dxc+Kc[1]*dyc+Kc[2]*dzc, byc=Kc[3]*dxc+Kc[4]*dyc+Kc[5]*dzc, bzc=Kc[6]*dxc+Kc[7]*dyc+Kc[8]*dzc;
+            return sample_dispatch_cpu<scalar_t>((int)interp_method,Fc,Mxc,Myc,Mzc,Mc[0],Mc[1],Mc[2],Mc[6],Mc[7],Mc[8],bxc,byc,bzc); };
+        auto covers=[&](int c,int i,int j,int k)->bool{
+            const int ci0=(int)lo[c*3],cj0=(int)lo[c*3+1],ck0=(int)lo[c*3+2];
+            const int Ci=(int)dim[c*3],Cj=(int)dim[c*3+1],Ck=(int)dim[c*3+2];
+            return !(i<ci0||i>=ci0+Ci||j<cj0||j>=cj0+Cj||k<ck0||k>=ck0+Ck); };
         for(int b=0;b<B;++b){
             const int Ai=(int)dim[b*3], Aj=(int)dim[b*3+1], Ak=(int)dim[b*3+2];
             const int vol=Ai*Aj*Ak; if(vol<=0) continue;
             const int i0=(int)lo[b*3], j0=(int)lo[b*3+1], k0=(int)lo[b*3+2];
             const scalar_t* Fb=F_ptr+F_off[b];
-            const int Mx=(int)shapes[b*3], My=(int)shapes[b*3+1], Mz=(int)shapes[b*3+2];
-            const scalar_t* M=meta+b*10; const scalar_t bx0=M[0],by0=M[1],bz0=M[2],idx=M[6],idy=M[7],idz=M[8];
-            const scalar_t* K=kin_ptr+b*21;
-            const scalar_t r00=K[0],r01=K[1],r02=K[2],r10=K[3],r11=K[4],r12=K[5],r20=K[6],r21=K[7],r22=K[8];
-            const scalar_t bp_x=K[9],bp_y=K[10],bp_z=K[11],cm_x=K[12],cm_y=K[13],cm_z=K[14];
-            // Cells of one body's AABB are independent; parallelise across
-            // them and accumulate into a per-thread 12-channel slice of a
-            // shared scratch buffer (no locking).  Final reduction across
-            // threads runs single-threaded after the parallel region.
-            const int nT = at::get_num_threads();
-            std::vector<double> tls((size_t)nT * 12, 0.0);
-            at::parallel_for(0, vol, /*grain_size=*/2048, [&](int64_t _begin, int64_t _end) {
-            double local12[12]={0,0,0,0,0,0,0,0,0,0,0,0};
-            for(int local=(int)_begin;local<(int)_end;++local){
+            const int Mxb=(int)shapes[b*3], Myb=(int)shapes[b*3+1], Mzb=(int)shapes[b*3+2];
+            const scalar_t* Mb=meta+b*10; const scalar_t* Kb=kin_ptr+b*21;
+            double acc[12]={0,0,0,0,0,0,0,0,0,0,0,0};
+            for(int local=0;local<vol;++local){
                 const int di=local/(Aj*Ak), rem=local-di*(Aj*Ak), dj=rem/Ak, dk=rem-dj*Ak;
                 const int i=i0+di,j=j0+dj,k=k0+dk; const int64_t g=((int64_t)i*Ngy+j)*Ngz+k;
                 const scalar_t xc=gx_ptr[i], yc=gy_ptr[j], zc=gz_ptr[k];
-                const scalar_t dxw=xc-bp_x,dyw=yc-bp_y,dzw=zc-bp_z;
-                const scalar_t bxq=r00*dxw+r01*dyw+r02*dzw, byq=r10*dxw+r11*dyw+r12*dzw, bzq=r20*dxw+r21*dyw+r22*dzw;
-                const scalar_t sbody=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq,byq,bzq);
-                if(!(sbody>band_lo && sbody<band_hi)) continue;
-                scalar_t dx=0,dy=0,dz=0;
-                if(Ngx>=3){ if(i==0) dx=((-3)*S(0,j,k)+4*S(1,j,k)-S(2,j,k))*0.5*inv_h; else if(i==Ngx-1) dx=(3*S(Ngx-1,j,k)-4*S(Ngx-2,j,k)+S(Ngx-3,j,k))*0.5*inv_h; else dx=(S(i+1,j,k)-S(i-1,j,k))*0.5*inv_h; } else if(Ngx==2) dx=(S(1,j,k)-S(0,j,k))*inv_h;
-                if(Ngy>=3){ if(j==0) dy=((-3)*S(i,0,k)+4*S(i,1,k)-S(i,2,k))*0.5*inv_h; else if(j==Ngy-1) dy=(3*S(i,Ngy-1,k)-4*S(i,Ngy-2,k)+S(i,Ngy-3,k))*0.5*inv_h; else dy=(S(i,j+1,k)-S(i,j-1,k))*0.5*inv_h; } else if(Ngy==2) dy=(S(i,1,k)-S(i,0,k))*inv_h;
-                if(Ngz>=3){ if(k==0) dz=((-3)*S(i,j,0)+4*S(i,j,1)-S(i,j,2))*0.5*inv_h; else if(k==Ngz-1) dz=(3*S(i,j,Ngz-1)-4*S(i,j,Ngz-2)+S(i,j,Ngz-3))*0.5*inv_h; else dz=(S(i,j,k+1)-S(i,j,k-1))*0.5*inv_h; } else if(Ngz==2) dz=(S(i,j,1)-S(i,j,0))*inv_h;
-                scalar_t norm=std::sqrt(dx*dx+dy*dy+dz*dz); scalar_t invn=norm>0?(scalar_t)1/norm:(scalar_t)0; const scalar_t nx=dx*invn,ny=dy*invn,nz=dz*invn;
-                // Velocity-gradient stencils — must mirror the CUDA kernel
-                // (cuda/streaming_sdf.cu) EXACTLY.  Normal derivatives are
-                // forward differences (backward on the upper boundary); the
-                // cross derivatives are O(h²) central on the CC-interpolated
-                // component, with 3-point one-sided formulas on the boundary
-                // planes.  (A clamped-index central difference is NOT the same
-                // thing: it silently degrades to first order at the boundary,
-                // and a clamped forward difference for dudx collapses to zero
-                // on the last plane.)
-                const int im1=i>0?i-1:0,        ip1=i+1<Ngx?i+1:i;
-                const int im2=i>1?i-2:0,        ip2=i+2<Ngx?i+2:(Ngx-1);
-                const int jm1=j>0?j-1:0,        jp1=j+1<Ngy?j+1:j;
-                const int jm2=j>1?j-2:0,        jp2=j+2<Ngy?j+2:(Ngy-1);
-                const int km1=k>0?k-1:0,        kp1=k+1<Ngz?k+1:k;
-                const int km2=k>1?k-2:0,        kp2=k+2<Ngz?k+2:(Ngz-1);
-
-                const scalar_t dudx = (i+1<Ngx)
-                    ? (up[(ip1*Ngy+j)*Ngz+k] - up[(i*Ngy+j)*Ngz+k]) * inv_h
-                    : (up[(i*Ngy+j)*Ngz+k]   - up[(im1*Ngy+j)*Ngz+k]) * inv_h;
-                const scalar_t dvdy = (j+1<Ngy)
-                    ? (vp[(i*Ngy+jp1)*Ngz+k] - vp[(i*Ngy+j)*Ngz+k]) * inv_h
-                    : (vp[(i*Ngy+j)*Ngz+k]   - vp[(i*Ngy+jm1)*Ngz+k]) * inv_h;
-                const scalar_t dwdz = (k+1<Ngz)
-                    ? (wp[(i*Ngy+j)*Ngz+kp1] - wp[(i*Ngy+j)*Ngz+k]) * inv_h
-                    : (wp[(i*Ngy+j)*Ngz+k]   - wp[(i*Ngy+j)*Ngz+km1]) * inv_h;
-
-                // 3-point O(h²) derivative of a CC-interpolated component along
-                // one axis: central in the interior, one-sided on the boundary.
-                auto d_cc=[&](scalar_t am2,scalar_t am1,scalar_t a0,
-                              scalar_t ap1,scalar_t ap2,int idxa,int Na)->scalar_t{
-                    if(Na>=3){
-                        if(idxa==0)      return ((scalar_t)(-3)*a0 + (scalar_t)4*ap1 - ap2)*(scalar_t)0.5*inv_h;
-                        if(idxa==Na-1)   return ((scalar_t)3*a0 - (scalar_t)4*am1 + am2)*(scalar_t)0.5*inv_h;
-                    }
-                    return (ap1 - am1)*(scalar_t)0.5*inv_h;
-                };
-                // u staggered in x → CC: 0.5*(u[i,..]+u[i+1,..])
-                auto u_cc=[&](int jj,int kk)->scalar_t{
-                    return (scalar_t)0.5*(up[(i*Ngy+jj)*Ngz+kk] + up[(ip1*Ngy+jj)*Ngz+kk]); };
-                // v staggered in y → CC: 0.5*(v[..,j,..]+v[..,j+1,..])
-                auto v_cc=[&](int ii,int kk)->scalar_t{
-                    return (scalar_t)0.5*(vp[(ii*Ngy+j)*Ngz+kk] + vp[(ii*Ngy+jp1)*Ngz+kk]); };
-                // w staggered in z → CC: 0.5*(w[..,k]+w[..,k+1])
-                auto w_cc=[&](int ii,int jj)->scalar_t{
-                    return (scalar_t)0.5*(wp[(ii*Ngy+jj)*Ngz+k] + wp[(ii*Ngy+jj)*Ngz+kp1]); };
-
-                const scalar_t dudy=d_cc(u_cc(jm2,k),u_cc(jm1,k),u_cc(j,k),u_cc(jp1,k),u_cc(jp2,k), j,Ngy);
-                const scalar_t dudz=d_cc(u_cc(j,km2),u_cc(j,km1),u_cc(j,k),u_cc(j,kp1),u_cc(j,kp2), k,Ngz);
-                const scalar_t dvdx=d_cc(v_cc(im2,k),v_cc(im1,k),v_cc(i,k),v_cc(ip1,k),v_cc(ip2,k), i,Ngx);
-                const scalar_t dvdz=d_cc(v_cc(i,km2),v_cc(i,km1),v_cc(i,k),v_cc(i,kp1),v_cc(i,kp2), k,Ngz);
-                const scalar_t dwdx=d_cc(w_cc(im2,j),w_cc(im1,j),w_cc(i,j),w_cc(ip1,j),w_cc(ip2,j), i,Ngx);
-                const scalar_t dwdy=d_cc(w_cc(i,jm2),w_cc(i,jm1),w_cc(i,j),w_cc(i,jp1),w_cc(i,jp2), j,Ngy);
-                const scalar_t nrv=nr_size==1?nr[0]:nr[g];
-                const scalar_t xs=nrv*(2*dudx*nx+(dudy+dvdx)*ny+(dudz+dwdx)*nz), ys=nrv*((dvdx+dudy)*nx+2*dvdy*ny+(dvdz+dwdy)*nz), zs=nrv*((dwdx+dudz)*nx+(dwdy+dvdz)*ny+2*dwdz*nz);
-                // Viscous delta centred at phi = off_visc, pressure delta at
-                // phi = off_pres.  Legacy = (0, eps_multiplier*h).
-                scalar_t dv=0,dp=0; const scalar_t sd=sbody-off_visc; const scalar_t sp=sbody-off_pres; if(sd>-eps_b&&sd<eps_b) dv=(1+std::cos(pi_eb*sd))*inv_2eps; if(sp>-eps_b&&sp<eps_b) dp=(1+std::cos(pi_eb*sp))*inv_2eps;
-                // deltaH: pressure force/torque come from the union-∂H pass below.
-                if(force_submethod!=0) dp=0;
-                // delta_order==2: MULTIPLY both deltas by |grad(sdf_body)| evaluated
-                // by re-sampling at world-aligned ±h offsets.  Coarea:
-                // oint_{phi=0} g dS = int g delta(phi) |grad phi| dV.  Matches the
-                // CUDA-3D twin in cuda/eulerian_forces.cu; without this the CPU path
-                // silently skipped the gradient correction and disagreed with CUDA.
-                if(delta_order==2 && (dv>0 || dp>0)){
-                    const scalar_t hg=(scalar_t)1.0/inv_h;
-                    const scalar_t s_xp=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+r00*hg,byq+r10*hg,bzq+r20*hg);
-                    const scalar_t s_xm=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq-r00*hg,byq-r10*hg,bzq-r20*hg);
-                    const scalar_t s_yp=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+r01*hg,byq+r11*hg,bzq+r21*hg);
-                    const scalar_t s_ym=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq-r01*hg,byq-r11*hg,bzq-r21*hg);
-                    const scalar_t s_zp=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+r02*hg,byq+r12*hg,bzq+r22*hg);
-                    const scalar_t s_zm=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq-r02*hg,byq-r12*hg,bzq-r22*hg);
-                    const scalar_t gm=std::sqrt(((s_xp-s_xm)*(s_xp-s_xm)+(s_yp-s_ym)*(s_yp-s_ym)+(s_zp-s_zm)*(s_zp-s_zm))*(scalar_t)0.25*inv_h*inv_h);
-                    dv*=gm; dp*=gm;
+                scalar_t gpx=0,gpy=0,gpz=0,gvx=0,gvy=0,gvz=0,meas_p=0,meas_v=0; bool has_p,has_v;
+                if(!body_normal){
+                    hgrad(i,j,k,off_pres,gpx,gpy,gpz); hgrad(i,j,k,off_visc,gvx,gvy,gvz);
+                    has_p=(gpx!=(scalar_t)0||gpy!=(scalar_t)0||gpz!=(scalar_t)0);
+                    has_v=(gvx!=(scalar_t)0||gvy!=(scalar_t)0||gvz!=(scalar_t)0);
+                } else {
+                    scalar_t gux,guy,guz; sgrad(i,j,k,gux,guy,guz);
+                    const scalar_t gmag=std::sqrt(gux*gux+guy*guy+guz*guz); const scalar_t phi_u=sdf[g];
+                    const scalar_t ddp=(phi_u-off_pres)*inv_eps, ddv=(phi_u-off_visc)*inv_eps, hie=(scalar_t)0.5*inv_eps;
+                    const scalar_t delp=(ddp>(scalar_t)-1&&ddp<(scalar_t)1)?((scalar_t)1+std::cos(pi*ddp))*hie:(scalar_t)0;
+                    const scalar_t delv=(ddv>(scalar_t)-1&&ddv<(scalar_t)1)?((scalar_t)1+std::cos(pi*ddv))*hie:(scalar_t)0;
+                    meas_p=delp*gmag; meas_v=delv*gmag; has_p=(meas_p!=(scalar_t)0); has_v=(meas_v!=(scalar_t)0);
                 }
-                const scalar_t px=-pp[g]*nx, py=-pp[g]*ny, pz=-pp[g]*nz, ax=xc-cm_x, ay=yc-cm_y, az=zc-cm_z;
-                const double fvx=xs*dv, fvy=ys*dv, fvz=zs*dv, fpx=px*dp, fpy=py*dp, fpz=pz*dp;
-                local12[0]+=fvx; local12[1]+=fvy; local12[2]+=fvz; local12[3]+=ay*fvz-az*fvy; local12[4]+=az*fvx-ax*fvz; local12[5]+=ax*fvy-ay*fvx;
-                local12[6]+=fpx; local12[7]+=fpy; local12[8]+=fpz; local12[9]+=ay*fpz-az*fpy; local12[10]+=az*fpx-ax*fpz; local12[11]+=ax*fpy-ay*fpx;
+                if(!(has_p||has_v)) continue;
+                const scalar_t dxw=xc-Kb[9],dyw=yc-Kb[10],dzw=zc-Kb[11];
+                const scalar_t bxq=Kb[0]*dxw+Kb[1]*dyw+Kb[2]*dzw, byq=Kb[3]*dxw+Kb[4]*dyw+Kb[5]*dzw, bzq=Kb[6]*dxw+Kb[7]*dyw+Kb[8]*dzw;
+                scalar_t s_bself;
+                if(!body_normal){
+                    s_bself=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mxb,Myb,Mzb,Mb[0],Mb[1],Mb[2],Mb[6],Mb[7],Mb[8],bxq,byq,bzq);
+                } else {
+                    scalar_t gbx,gby,gbz; s_bself=trigrad(Fb,Mxb,Myb,Mzb,Mb[0],Mb[1],Mb[2],Mb[6],Mb[7],Mb[8],bxq,byq,bzq,gbx,gby,gbz);
+                    scalar_t nbx=gbx*Kb[0]+gby*Kb[3]+gbz*Kb[6], nby=gbx*Kb[1]+gby*Kb[4]+gbz*Kb[7], nbz=gbx*Kb[2]+gby*Kb[5]+gbz*Kb[8];
+                    const scalar_t nlen=std::sqrt(nbx*nbx+nby*nby+nbz*nbz); const scalar_t invn=nlen>(scalar_t)0?(scalar_t)1/nlen:(scalar_t)0;
+                    nbx*=invn;nby*=invn;nbz*=invn;
+                    gpx=meas_p*nbx;gpy=meas_p*nby;gpz=meas_p*nbz; gvx=meas_v*nbx;gvy=meas_v*nby;gvz=meas_v*nbz;
+                }
+                scalar_t wb=0;
+                if(soft){
+                    scalar_t Z=0;
+                    for(int c=0;c<B;++c){ if(!covers(c,i,j,k)) continue; const scalar_t s_c=(c==b)?s_bself:phi_c(c,i,j,k); Z+=(scalar_t)1/((scalar_t)1+std::exp(s_c*inv_blend)); }
+                    if(Z>(scalar_t)0) wb=((scalar_t)1/((scalar_t)1+std::exp(s_bself*inv_blend)))/Z;
+                } else {
+                    scalar_t smin=(scalar_t)1e30; int bmin=-1;
+                    for(int c=0;c<B;++c){ if(!covers(c,i,j,k)) continue; const scalar_t s_c=(c==b)?s_bself:phi_c(c,i,j,k); if(s_c<smin){smin=s_c;bmin=c;} }
+                    wb=(bmin==b)?(scalar_t)1:(scalar_t)0;
+                }
+                if(wb==(scalar_t)0) continue;
+                scalar_t fp_x=0,fp_y=0,fp_z=0;
+                if(has_p){ const scalar_t p_c=pp[g]; fp_x=-p_c*gpx;fp_y=-p_c*gpy;fp_z=-p_c*gpz; }
+                scalar_t fv_x=0,fv_y=0,fv_z=0;
+                if(has_v){
+                    const int im1=i>0?i-1:0, ip1=i+1<Ngx?i+1:i, im2=i>1?i-2:0, ip2=i+2<Ngx?i+2:(Ngx-1);
+                    const int jm1=j>0?j-1:0, jp1=j+1<Ngy?j+1:j, jm2=j>1?j-2:0, jp2=j+2<Ngy?j+2:(Ngy-1);
+                    const int km1=k>0?k-1:0, kp1=k+1<Ngz?k+1:k, km2=k>1?k-2:0, kp2=k+2<Ngz?k+2:(Ngz-1);
+                    const scalar_t dudx=(i+1<Ngx)?(up[(ip1*Ngy+j)*Ngz+k]-up[(i*Ngy+j)*Ngz+k])*inv_h:(up[(i*Ngy+j)*Ngz+k]-up[(im1*Ngy+j)*Ngz+k])*inv_h;
+                    const scalar_t dvdy=(j+1<Ngy)?(vp[(i*Ngy+jp1)*Ngz+k]-vp[(i*Ngy+j)*Ngz+k])*inv_h:(vp[(i*Ngy+j)*Ngz+k]-vp[(i*Ngy+jm1)*Ngz+k])*inv_h;
+                    const scalar_t dwdz=(k+1<Ngz)?(wp[(i*Ngy+j)*Ngz+kp1]-wp[(i*Ngy+j)*Ngz+k])*inv_h:(wp[(i*Ngy+j)*Ngz+k]-wp[(i*Ngy+j)*Ngz+km1])*inv_h;
+                    auto d_cc=[&](scalar_t am2,scalar_t am1,scalar_t a0,scalar_t ap1,scalar_t ap2,int idxa,int Na)->scalar_t{ if(Na>=3){ if(idxa==0) return ((scalar_t)(-3)*a0+(scalar_t)4*ap1-ap2)*(scalar_t)0.5*inv_h; if(idxa==Na-1) return ((scalar_t)3*a0-(scalar_t)4*am1+am2)*(scalar_t)0.5*inv_h; } return (ap1-am1)*(scalar_t)0.5*inv_h; };
+                    auto u_cc=[&](int jj,int kk)->scalar_t{ return (scalar_t)0.5*(up[(i*Ngy+jj)*Ngz+kk]+up[(ip1*Ngy+jj)*Ngz+kk]); };
+                    auto v_cc=[&](int ii,int kk)->scalar_t{ return (scalar_t)0.5*(vp[(ii*Ngy+j)*Ngz+kk]+vp[(ii*Ngy+jp1)*Ngz+kk]); };
+                    auto w_cc=[&](int ii,int jj)->scalar_t{ return (scalar_t)0.5*(wp[(ii*Ngy+jj)*Ngz+k]+wp[(ii*Ngy+jj)*Ngz+kp1]); };
+                    const scalar_t dudy=d_cc(u_cc(jm2,k),u_cc(jm1,k),u_cc(j,k),u_cc(jp1,k),u_cc(jp2,k),j,Ngy);
+                    const scalar_t dudz=d_cc(u_cc(j,km2),u_cc(j,km1),u_cc(j,k),u_cc(j,kp1),u_cc(j,kp2),k,Ngz);
+                    const scalar_t dvdx=d_cc(v_cc(im2,k),v_cc(im1,k),v_cc(i,k),v_cc(ip1,k),v_cc(ip2,k),i,Ngx);
+                    const scalar_t dvdz=d_cc(v_cc(i,km2),v_cc(i,km1),v_cc(i,k),v_cc(i,kp1),v_cc(i,kp2),k,Ngz);
+                    const scalar_t dwdx=d_cc(w_cc(im2,j),w_cc(im1,j),w_cc(i,j),w_cc(ip1,j),w_cc(ip2,j),i,Ngx);
+                    const scalar_t dwdy=d_cc(w_cc(i,jm2),w_cc(i,jm1),w_cc(i,j),w_cc(i,jp1),w_cc(i,jp2),j,Ngy);
+                    const scalar_t nrv=nr_size==1?nr[0]:nr[g];
+                    const scalar_t sxx=nrv*(scalar_t)2*dudx, syy=nrv*(scalar_t)2*dvdy, szz=nrv*(scalar_t)2*dwdz;
+                    const scalar_t sxy=nrv*(dudy+dvdx), sxz=nrv*(dudz+dwdx), syz=nrv*(dvdz+dwdy);
+                    fv_x=sxx*gvx+sxy*gvy+sxz*gvz; fv_y=sxy*gvx+syy*gvy+syz*gvz; fv_z=sxz*gvx+syz*gvy+szz*gvz;
+                }
+                const scalar_t ax=xc-Kb[12],ay=yc-Kb[13],az=zc-Kb[14];
+                const scalar_t fvx=wb*fv_x,fvy=wb*fv_y,fvz=wb*fv_z, fpx=wb*fp_x,fpy=wb*fp_y,fpz=wb*fp_z;
+                acc[0]+=fvx;acc[1]+=fvy;acc[2]+=fvz; acc[3]+=ay*fvz-az*fvy;acc[4]+=az*fvx-ax*fvz;acc[5]+=ax*fvy-ay*fvx;
+                acc[6]+=fpx;acc[7]+=fpy;acc[8]+=fpz; acc[9]+=ay*fpz-az*fpy;acc[10]+=az*fpx-ax*fpz;acc[11]+=ax*fpy-ay*fpx;
             }
-            // Per-thread slice; no race because each thread t writes only
-            // tls[t*12 + c..c+11].  Multiple chunks assigned to the same
-            // thread accumulate sequentially.
-            const int t = at::get_thread_num();
-            for(int c=0;c<12;++c) tls[(size_t)t*12+c]+=local12[c];
-            });
-            double acc[12]={0,0,0,0,0,0,0,0,0,0,0,0};
-            for(int t=0;t<nT;++t)
-                for(int c=0;c<12;++c) acc[c]+=tls[(size_t)t*12+c];
             for(int c=0;c<12;++c) outp[b*12+c]+=acc[c]*h3d;
-        }
-        // ---- deltaH: union-∂H pressure force density, softmin partition ----
-        if(force_submethod!=0){
-            const scalar_t inv_eps=(scalar_t)(1.0/eps_body);
-            const double tau=(ph_tau>0.0)?ph_tau:1e-9;
-            const scalar_t inv_tau=(scalar_t)(1.0/tau);
-            int ulo[3]={Ngx,Ngy,Ngz}, uhi[3]={0,0,0};
-            for(int b=0;b<B;++b) for(int d=0;d<3;++d){int a0=(int)lo[b*3+d];int a1=a0+(int)dim[b*3+d];if(a0<ulo[d])ulo[d]=a0;if(a1>uhi[d])uhi[d]=a1;}
-            const int Ng[3]={Ngx,Ngy,Ngz}; const int halo=2;
-            for(int d=0;d<3;++d){ulo[d]-=halo;if(ulo[d]<0)ulo[d]=0;uhi[d]+=halo;if(uhi[d]>Ng[d])uhi[d]=Ng[d];}
-            auto Hs=[&](int i,int j,int k)->scalar_t{ scalar_t x=S(i,j,k)*inv_eps; x=x<(scalar_t)-1?(scalar_t)-1:(x>(scalar_t)1?(scalar_t)1:x); return (scalar_t)0.5*((scalar_t)1+x+std::sin(pi*x)/pi); };
-            for(int i=ulo[0];i<uhi[0];++i)for(int j=ulo[1];j<uhi[1];++j)for(int k=ulo[2];k<uhi[2];++k){
-                scalar_t gHx=0,gHy=0,gHz=0;
-                if(Ngx>=3){ if(i==0) gHx=((-3)*Hs(0,j,k)+4*Hs(1,j,k)-Hs(2,j,k))*(scalar_t)0.5*inv_h; else if(i==Ngx-1) gHx=(3*Hs(Ngx-1,j,k)-4*Hs(Ngx-2,j,k)+Hs(Ngx-3,j,k))*(scalar_t)0.5*inv_h; else gHx=(Hs(i+1,j,k)-Hs(i-1,j,k))*(scalar_t)0.5*inv_h; } else if(Ngx==2) gHx=(Hs(1,j,k)-Hs(0,j,k))*inv_h;
-                if(Ngy>=3){ if(j==0) gHy=((-3)*Hs(i,0,k)+4*Hs(i,1,k)-Hs(i,2,k))*(scalar_t)0.5*inv_h; else if(j==Ngy-1) gHy=(3*Hs(i,Ngy-1,k)-4*Hs(i,Ngy-2,k)+Hs(i,Ngy-3,k))*(scalar_t)0.5*inv_h; else gHy=(Hs(i,j+1,k)-Hs(i,j-1,k))*(scalar_t)0.5*inv_h; } else if(Ngy==2) gHy=(Hs(i,1,k)-Hs(i,0,k))*inv_h;
-                if(Ngz>=3){ if(k==0) gHz=((-3)*Hs(i,j,0)+4*Hs(i,j,1)-Hs(i,j,2))*(scalar_t)0.5*inv_h; else if(k==Ngz-1) gHz=(3*Hs(i,j,Ngz-1)-4*Hs(i,j,Ngz-2)+Hs(i,j,Ngz-3))*(scalar_t)0.5*inv_h; else gHz=(Hs(i,j,k+1)-Hs(i,j,k-1))*(scalar_t)0.5*inv_h; } else if(Ngz==2) gHz=(Hs(i,j,1)-Hs(i,j,0))*inv_h;
-                if(gHx==(scalar_t)0&&gHy==(scalar_t)0&&gHz==(scalar_t)0) continue;
-                const int64_t g=((int64_t)i*Ngy+j)*Ngz+k;
-                const scalar_t p_c=pp[g];
-                const scalar_t fdx=-p_c*gHx, fdy=-p_c*gHy, fdz=-p_c*gHz;
-                const scalar_t xc=gx_ptr[i],yc=gy_ptr[j],zc=gz_ptr[k];
-                const scalar_t sdfu=sdf[g];
-                scalar_t Z=0;
-                for(int b=0;b<B;++b){
-                    const int i0=(int)lo[b*3],j0=(int)lo[b*3+1],k0=(int)lo[b*3+2];
-                    const int Ai=(int)dim[b*3],Aj=(int)dim[b*3+1],Ak=(int)dim[b*3+2];
-                    if(i<i0||i>=i0+Ai||j<j0||j>=j0+Aj||k<k0||k>=k0+Ak) continue;
-                    const scalar_t* Fb=F_ptr+F_off[b]; const int Mx=(int)shapes[b*3],My=(int)shapes[b*3+1],Mz=(int)shapes[b*3+2];
-                    const scalar_t* M=meta+b*10; const scalar_t* K=kin_ptr+b*21;
-                    const scalar_t dxw=xc-K[9],dyw=yc-K[10],dzw=zc-K[11];
-                    const scalar_t bxq=K[0]*dxw+K[1]*dyw+K[2]*dzw, byq=K[3]*dxw+K[4]*dyw+K[5]*dzw, bzq=K[6]*dxw+K[7]*dyw+K[8]*dzw;
-                    const scalar_t s_b=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,M[0],M[1],M[2],M[6],M[7],M[8],bxq,byq,bzq);
-                    Z+=std::exp(-(s_b-sdfu)*inv_tau);
-                }
-                if(Z<=(scalar_t)0) continue;
-                const scalar_t invZ=(scalar_t)1/Z;
-                for(int b=0;b<B;++b){
-                    const int i0=(int)lo[b*3],j0=(int)lo[b*3+1],k0=(int)lo[b*3+2];
-                    const int Ai=(int)dim[b*3],Aj=(int)dim[b*3+1],Ak=(int)dim[b*3+2];
-                    if(i<i0||i>=i0+Ai||j<j0||j>=j0+Aj||k<k0||k>=k0+Ak) continue;
-                    const scalar_t* Fb=F_ptr+F_off[b]; const int Mx=(int)shapes[b*3],My=(int)shapes[b*3+1],Mz=(int)shapes[b*3+2];
-                    const scalar_t* M=meta+b*10; const scalar_t* K=kin_ptr+b*21;
-                    const scalar_t dxw=xc-K[9],dyw=yc-K[10],dzw=zc-K[11];
-                    const scalar_t bxq=K[0]*dxw+K[1]*dyw+K[2]*dzw, byq=K[3]*dxw+K[4]*dyw+K[5]*dzw, bzq=K[6]*dxw+K[7]*dyw+K[8]*dzw;
-                    const scalar_t s_b=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,M[0],M[1],M[2],M[6],M[7],M[8],bxq,byq,bzq);
-                    const scalar_t wb=std::exp(-(s_b-sdfu)*inv_tau)*invZ;
-                    const scalar_t fbx=wb*fdx,fby=wb*fdy,fbz=wb*fdz;
-                    const scalar_t ax=xc-K[12],ay=yc-K[13],az=zc-K[14];
-                    outp[b*12+6]+=(double)fbx*h3d; outp[b*12+7]+=(double)fby*h3d; outp[b*12+8]+=(double)fbz*h3d;
-                    outp[b*12+9]+=((double)ay*fbz-(double)az*fby)*h3d;
-                    outp[b*12+10]+=((double)az*fbx-(double)ax*fbz)*h3d;
-                    outp[b*12+11]+=((double)ax*fby-(double)ay*fbx)*h3d;
-                }
-            }
         }
     });
 }

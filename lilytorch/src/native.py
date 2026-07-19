@@ -91,9 +91,13 @@ def streaming_sdf_forces_post_3d(
     are separate arguments because a like-for-like comparison against the
     lagrangian readout requires pinning both readouts to the same locations.
 
-    ``force_submethod``: 0 = n·δ (default), 1 = partial-Heaviside ∂H readout
-    (union-∂H pressure force density split to bodies by a softmin partition of
-    unity with temperature ``ph_tau``).
+    ``force_submethod``: 0 = ndelta = union smoothed-Heaviside gradient ∂_iH
+    for BOTH channels (the default, and the only gauge-safe readout); 2 = sm2 =
+    union coarea magnitude × per-body analytic normal (per-link-accuracy variant,
+    gauge-UNSAFE — must never reach the two-phase solver).  Both split the union
+    force to bodies by a softmin partition of unity whose blend width is carried
+    by ``ph_tau`` (metres; ≤0 → hard nearest-body winner).  (Value 1, the old
+    deltaH readout, has been removed; there is an intentional numbering gap.)
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_forces_post_3d.default(
         F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
@@ -398,9 +402,13 @@ def streaming_sdf_forces_post_2d(
     ``sample_offset_pressure`` / ``sample_offset_friction``: see
     ``streaming_sdf_forces_post_3d``.  Production default ``(0, eps)``.
 
-    ``force_submethod``: 0 = n·δ (default), 1 = partial-Heaviside ∂H readout
-    (union-∂H pressure force density split to bodies by a softmin partition of
-    unity with temperature ``ph_tau``).
+    ``force_submethod``: 0 = ndelta = union smoothed-Heaviside gradient ∂_iH
+    for BOTH channels (the default, and the only gauge-safe readout); 2 = sm2 =
+    union coarea magnitude × per-body analytic normal (per-link-accuracy variant,
+    gauge-UNSAFE — must never reach the two-phase solver).  Both split the union
+    force to bodies by a softmin partition of unity whose blend width is carried
+    by ``ph_tau`` (metres; ≤0 → hard nearest-body winner).  (Value 1, the old
+    deltaH readout, has been removed; there is an intentional numbering gap.)
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_forces_post_2d.default(
         F_flat, F_offsets,

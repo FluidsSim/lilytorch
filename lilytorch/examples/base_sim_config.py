@@ -186,12 +186,12 @@ class BaseSimConfig:
         self.dtype                   = None
         self.zero_pressure_inside    = None
         self.force_method            = None
-        # Eulerian pressure-force readout sub-method: None → solver default
-        # ("ndelta", F=-Σ p·n·δ_ε).  "deltaH" = partial-Heaviside readout
-        # (union-∂H force density split to bodies by a softmin partition of
-        # unity, τ = force_ph_blend_cells·h); seam-free / hydrostatic-leak-free.
-        self.force_submethod         = None
-        self.force_ph_blend_cells    = None   # None → solver default (1.5)
+        # Eulerian force readout: which normal the per-link split rides on.
+        # None → solver default "union" (union ∂H band measure + ∂H direction;
+        # gauge-safe, the only readout allowed with two-phase).  "body" = union
+        # coarea magnitude × each link's analytic normal (per-link-accuracy
+        # variant, gauge-UNSAFE — analysis-only, forbidden with two-phase).
+        self.force_link_normal       = None
         # Distance (units of length) to offset the sample point from the
         # body surface along the outward normal when integrating
         # Lagrangian surface forces.  0 (default) samples exactly at the
@@ -892,8 +892,7 @@ class BaseSimConfig:
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
-            ("force_submethod",         self.force_submethod),
-            ("force_ph_blend_cells",    self.force_ph_blend_cells),
+            ("force_link_normal",       self.force_link_normal),
             ("lagrangian_sample_offset", self.lagrangian_sample_offset),
             ("sample_offset_pressure_cells", self.sample_offset_pressure_cells),
             ("sample_offset_friction_cells", self.sample_offset_friction_cells),

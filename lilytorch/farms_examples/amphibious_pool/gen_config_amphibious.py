@@ -79,7 +79,9 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf                   = True
         self.convexify                     = False
         self.force_method                  = "eulerian"
-        self.force_submethod               = "deltaH"
+        # Defaults to force_link_normal='union' (union-∂H band measure, BOTH
+        # channels): the seam-free / no-hydrostatic-leak gauge that the retired
+        # deltaH submethod used to provide.
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = False

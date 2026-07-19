@@ -438,327 +438,88 @@ void streaming_sdf_forces_post_2d_cpu(
         const int64_t   nr_size = nu_rho_field.numel();
 
         const scalar_t inv_h_s    = (scalar_t)(1.0 / h_grid);
-        const scalar_t eps_b      = (scalar_t)eps_body;
         const scalar_t off_pres   = (scalar_t)sample_offset_pressure;
         const scalar_t off_visc   = (scalar_t)sample_offset_friction;
         const scalar_t pi_v       = (scalar_t)3.141592653589793;
-        const scalar_t inv_2eps   = (scalar_t)0.5 / eps_b;
-        const scalar_t pi_over_eb = pi_v / eps_b;
         const double   h2_d       = (double)h2;
-
-        // Union of the two delta supports — see eulerian_forces.cu.
-        const scalar_t band_lo = (off_pres < off_visc ? off_pres : off_visc) - eps_b;
-        const scalar_t band_hi = (off_pres > off_visc ? off_pres : off_visc) + eps_b;
 
         std::vector<double> accs(static_cast<size_t>(B) * 6, 0.0);
 
-        for (int b = 0; b < B; ++b) {
-            const int Ai = (int)dim_[b*2 + 0];
-            const int Aj = (int)dim_[b*2 + 1];
-            const int vol = Ai * Aj;
-            if (vol <= 0) continue;
-
-            const int i0_b = (int)lo[b*2 + 0];
-            const int j0_b = (int)lo[b*2 + 1];
-
-            const scalar_t* F_b = F_ptr + F_off[b];
-            const int Mx = (int)shapes[b*2 + 0];
-            const int My = (int)shapes[b*2 + 1];
-
-            const scalar_t* M   = meta + b*7;
-            const scalar_t bx0  = M[0], by0 = M[1];
-            const scalar_t idx_ = M[4], idy_ = M[5];
-
-            const scalar_t* K   = kin_ptr + b*11;
-            const scalar_t r00  = K[0], r01 = K[1];
-            const scalar_t r10  = K[2], r11 = K[3];
-            const scalar_t bp_x = K[4], bp_y = K[5];
-            const scalar_t cm_x = K[6], cm_y = K[7];
-
-            // Single fused pass: sample the body cc-SDF on the fly inside the
-            // parallel_for, do the band check, and (for delta_order==2)
-            // re-sample at world-aligned ±h offsets to recover |grad(sdf_body)|.
-            // This replaces the previous two-pass design with a sparse_buf
-            // scratch + AABB-edge one-sided diffs, which disagreed with CUDA-2D
-            // at AABB-boundary cells.  Now matches streaming_sdf_2d.cu:524-543.
-            //
-            // Per-thread accumulator slice (no locking): each worker writes
-            // only its own 6-channel stripe of ``tls``, merged single-thread
-            // into ``lb`` after the parallel region.  Replaces the previous
-            // std::mutex/lock_guard that serialised every chunk's epilogue.
-            double* lb = accs.data() + (size_t)b * 6;
-            const int nT = at::get_num_threads();
-            std::vector<double> tls((size_t)nT * 6, 0.0);
-
-            at::parallel_for(0, vol, 2048, [&](int64_t _begin, int64_t _end) {
-            double local8[6] = {0,0,0,0,0,0};
-            for (int local = (int)_begin; local < (int)_end; ++local) {
-                const int di = local / Aj;
-                const int dj = local - di * Aj;
-                const int i  = i0_b + di;
-                const int j  = j0_b + dj;
-                const std::int64_t g_idx = (std::int64_t)i * Ngy + j;
-
-                const scalar_t xc = gx_ptr[i];
-                const scalar_t yc = gy_ptr[j];
-                const scalar_t dxw = xc - bp_x, dyw = yc - bp_y;
-                const scalar_t bxq = r00 * dxw + r01 * dyw;
-                const scalar_t byq = r10 * dxw + r11 * dyw;
-
-                const scalar_t sdf = (interp_method == 1)
-                    ? biquadratic_sample_uniform_2d<scalar_t>(
-                          F_b, Mx, My, bx0, by0, idx_, idy_, bxq, byq)
-                    : bilinear_sample_uniform_2d<scalar_t>(
-                          F_b, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
-                if (sdf <= band_lo || sdf >= band_hi) continue;
-
-                // Viscous delta centred at phi = off_visc, pressure delta at
-                // phi = off_pres.  Legacy = (0, eps_multiplier*h).
-                scalar_t delta_visc = 0;
-                const scalar_t d_visc = sdf - off_visc;
-                if (d_visc > -eps_b && d_visc < eps_b)
-                    delta_visc = ((scalar_t)1 + std::cos(pi_over_eb * d_visc)) * inv_2eps;
-                scalar_t delta_pres = 0;
-                const scalar_t d_pres = sdf - off_pres;
-                if (d_pres > -eps_b && d_pres < eps_b)
-                    delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * d_pres)) * inv_2eps;
-                // deltaH: pressure force/torque come from the union-∂H pass below.
-                if (force_submethod != 0) delta_pres = 0;
-                if (delta_visc == (scalar_t)0 && delta_pres == (scalar_t)0) continue;
-
-                if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
-                    const scalar_t hg = (scalar_t)1.0 / inv_h_s;
-                    auto smp = [&](scalar_t xqs, scalar_t yqs) -> scalar_t {
-                        return (interp_method == 1)
-                            ? biquadratic_sample_uniform_2d<scalar_t>(
-                                  F_b, Mx, My, bx0, by0, idx_, idy_, xqs, yqs)
-                            : bilinear_sample_uniform_2d<scalar_t>(
-                                  F_b, Mx, My, bx0, by0, idx_, idy_, xqs, yqs);
-                    };
-                    const scalar_t s_xp = smp(bxq + r00*hg, byq + r10*hg);
-                    const scalar_t s_xm = smp(bxq - r00*hg, byq - r10*hg);
-                    const scalar_t s_yp = smp(bxq + r01*hg, byq + r11*hg);
-                    const scalar_t s_ym = smp(bxq - r01*hg, byq - r11*hg);
-                    const scalar_t dsdx = (s_xp - s_xm) * (scalar_t)0.5 * inv_h_s;
-                    const scalar_t dsdy = (s_yp - s_ym) * (scalar_t)0.5 * inv_h_s;
-                    const scalar_t grad_mag = std::sqrt(dsdx*dsdx + dsdy*dsdy);
-                    // Coarea: oint_{phi=0} g dS = int g delta(phi) |grad phi| dV,
-                    // so the surface delta is delta_eps(phi) * |grad phi|.
-                    delta_visc *= grad_mag;
-                    delta_pres *= grad_mag;
+        // ---- submethod 0/2: UNIFIED union-measure + partition (2-D) ----
+        //      Mirrors forces_post_union_blend_2d_kernel.  Writes into accs
+        //      (the h2 factor is applied by the final accumulation below).
+        const bool body_normal = (force_submethod == 2);
+        const scalar_t inv_eps = (scalar_t)(1.0/eps_body);
+        const scalar_t blend_eps = (scalar_t)ph_tau;
+        const bool soft = blend_eps > (scalar_t)0;
+        const scalar_t inv_blend = soft ? ((scalar_t)1/blend_eps) : (scalar_t)0;
+        auto S2=[&](int i,int j)->scalar_t{ return sdf_cc_p[(std::int64_t)i*Ngy+j]; };
+        auto Hoff=[&](int i,int j,scalar_t off)->scalar_t{ scalar_t x=(S2(i,j)-off)*inv_eps; x=x<(scalar_t)-1?(scalar_t)-1:(x>(scalar_t)1?(scalar_t)1:x); return (scalar_t)0.5*((scalar_t)1+x+std::sin(pi_v*x)/pi_v); };
+        auto hgrad=[&](int i,int j,scalar_t off,scalar_t& gX,scalar_t& gY){
+            gX=0;gY=0;
+            if(Ngx>=3){ if(i==0) gX=((scalar_t)(-3)*Hoff(0,j,off)+(scalar_t)4*Hoff(1,j,off)-Hoff(2,j,off))*(scalar_t)0.5*inv_h_s; else if(i==Ngx-1) gX=((scalar_t)3*Hoff(Ngx-1,j,off)-(scalar_t)4*Hoff(Ngx-2,j,off)+Hoff(Ngx-3,j,off))*(scalar_t)0.5*inv_h_s; else gX=(Hoff(i+1,j,off)-Hoff(i-1,j,off))*(scalar_t)0.5*inv_h_s; } else if(Ngx==2) gX=(Hoff(1,j,off)-Hoff(0,j,off))*inv_h_s;
+            if(Ngy>=3){ if(j==0) gY=((scalar_t)(-3)*Hoff(i,0,off)+(scalar_t)4*Hoff(i,1,off)-Hoff(i,2,off))*(scalar_t)0.5*inv_h_s; else if(j==Ngy-1) gY=((scalar_t)3*Hoff(i,Ngy-1,off)-(scalar_t)4*Hoff(i,Ngy-2,off)+Hoff(i,Ngy-3,off))*(scalar_t)0.5*inv_h_s; else gY=(Hoff(i,j+1,off)-Hoff(i,j-1,off))*(scalar_t)0.5*inv_h_s; } else if(Ngy==2) gY=(Hoff(i,1,off)-Hoff(i,0,off))*inv_h_s;
+        };
+        auto sgrad=[&](int i,int j,scalar_t& gX,scalar_t& gY){
+            gX=0;gY=0;
+            if(Ngx>=3){ if(i==0) gX=((scalar_t)(-3)*S2(0,j)+(scalar_t)4*S2(1,j)-S2(2,j))*(scalar_t)0.5*inv_h_s; else if(i==Ngx-1) gX=((scalar_t)3*S2(Ngx-1,j)-(scalar_t)4*S2(Ngx-2,j)+S2(Ngx-3,j))*(scalar_t)0.5*inv_h_s; else gX=(S2(i+1,j)-S2(i-1,j))*(scalar_t)0.5*inv_h_s; } else if(Ngx==2) gX=(S2(1,j)-S2(0,j))*inv_h_s;
+            if(Ngy>=3){ if(j==0) gY=((scalar_t)(-3)*S2(i,0)+(scalar_t)4*S2(i,1)-S2(i,2))*(scalar_t)0.5*inv_h_s; else if(j==Ngy-1) gY=((scalar_t)3*S2(i,Ngy-1)-(scalar_t)4*S2(i,Ngy-2)+S2(i,Ngy-3))*(scalar_t)0.5*inv_h_s; else gY=(S2(i,j+1)-S2(i,j-1))*(scalar_t)0.5*inv_h_s; } else if(Ngy==2) gY=(S2(i,1)-S2(i,0))*inv_h_s;
+        };
+        auto samp2d=[&](const scalar_t* F,int Mx,int My,scalar_t bx0,scalar_t by0,scalar_t idx_,scalar_t idy_,scalar_t xq,scalar_t yq)->scalar_t{
+            return (interp_method==1)?biquadratic_sample_uniform_2d<scalar_t>(F,Mx,My,bx0,by0,idx_,idy_,xq,yq):bilinear_sample_uniform_2d<scalar_t>(F,Mx,My,bx0,by0,idx_,idy_,xq,yq); };
+        auto trigrad=[&](const scalar_t* F,int Mx,int My,scalar_t bx0,scalar_t by0,scalar_t idx_,scalar_t idy_,scalar_t xq,scalar_t yq,scalar_t& gbx,scalar_t& gby)->scalar_t{
+            scalar_t tx=(xq-bx0)*idx_, ty=(yq-by0)*idy_;
+            tx=std::max((scalar_t)0,std::min(tx,(scalar_t)(Mx-1))); ty=std::max((scalar_t)0,std::min(ty,(scalar_t)(My-1)));
+            int ix=(int)tx; if(ix>Mx-2) ix=Mx-2; int iy=(int)ty; if(iy>My-2) iy=My-2;
+            const scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy; const int s1=My, base=ix*s1+iy;
+            const scalar_t c00=F[base],c01=F[base+1],c10=F[base+s1],c11=F[base+s1+1];
+            const scalar_t omfx=(scalar_t)1-fx, omfy=(scalar_t)1-fy;
+            const scalar_t val=omfx*(omfy*c00+fy*c01)+fx*(omfy*c10+fy*c11);
+            const scalar_t dfx=omfy*(c10-c00)+fy*(c11-c01), dfy=omfx*(c01-c00)+fx*(c11-c10);
+            gbx=dfx*idx_; gby=dfy*idy_; return val; };
+        auto covers=[&](int c,int i,int j)->bool{ const int ci0=(int)lo[c*2],cj0=(int)lo[c*2+1],Ci=(int)dim_[c*2],Cj=(int)dim_[c*2+1]; return !(i<ci0||i>=ci0+Ci||j<cj0||j>=cj0+Cj); };
+        auto phi_c=[&](int c,int i,int j)->scalar_t{ const scalar_t* Fc=F_ptr+F_off[c]; const int Mxc=(int)shapes[c*2],Myc=(int)shapes[c*2+1]; const scalar_t* Mc=meta+c*7; const scalar_t* Kc=kin_ptr+c*11; const scalar_t dxc=gx_ptr[i]-Kc[4],dyc=gy_ptr[j]-Kc[5]; return samp2d(Fc,Mxc,Myc,Mc[0],Mc[1],Mc[4],Mc[5],Kc[0]*dxc+Kc[1]*dyc,Kc[2]*dxc+Kc[3]*dyc); };
+        for(int b=0;b<B;++b){
+            const int Ai=(int)dim_[b*2],Aj=(int)dim_[b*2+1]; const int vol=Ai*Aj; if(vol<=0) continue;
+            const int i0=(int)lo[b*2],j0=(int)lo[b*2+1];
+            const scalar_t* Fb=F_ptr+F_off[b]; const int Mxb=(int)shapes[b*2],Myb=(int)shapes[b*2+1];
+            const scalar_t* Mb=meta+b*7; const scalar_t* Kb=kin_ptr+b*11;
+            double* lb=accs.data()+(size_t)b*6;
+            for(int local=0;local<vol;++local){
+                const int di=local/Aj, dj=local-di*Aj; const int i=i0+di,j=j0+dj; const std::int64_t g=(std::int64_t)i*Ngy+j;
+                const scalar_t xc=gx_ptr[i], yc=gy_ptr[j];
+                scalar_t gpx=0,gpy=0,gvx=0,gvy=0,meas_p=0,meas_v=0; bool has_p,has_v;
+                if(!body_normal){ hgrad(i,j,off_pres,gpx,gpy); hgrad(i,j,off_visc,gvx,gvy); has_p=(gpx!=(scalar_t)0||gpy!=(scalar_t)0); has_v=(gvx!=(scalar_t)0||gvy!=(scalar_t)0); }
+                else { scalar_t gux,guy; sgrad(i,j,gux,guy); const scalar_t gmag=std::sqrt(gux*gux+guy*guy); const scalar_t phi_u=S2(i,j); const scalar_t ddp=(phi_u-off_pres)*inv_eps,ddv=(phi_u-off_visc)*inv_eps,hie=(scalar_t)0.5*inv_eps; const scalar_t delp=(ddp>(scalar_t)-1&&ddp<(scalar_t)1)?((scalar_t)1+std::cos(pi_v*ddp))*hie:(scalar_t)0; const scalar_t delv=(ddv>(scalar_t)-1&&ddv<(scalar_t)1)?((scalar_t)1+std::cos(pi_v*ddv))*hie:(scalar_t)0; meas_p=delp*gmag; meas_v=delv*gmag; has_p=(meas_p!=(scalar_t)0); has_v=(meas_v!=(scalar_t)0); }
+                if(!(has_p||has_v)) continue;
+                const scalar_t dxw=xc-Kb[4],dyw=yc-Kb[5]; const scalar_t bxq=Kb[0]*dxw+Kb[1]*dyw, byq=Kb[2]*dxw+Kb[3]*dyw;
+                scalar_t s_bself;
+                if(!body_normal){ s_bself=samp2d(Fb,Mxb,Myb,Mb[0],Mb[1],Mb[4],Mb[5],bxq,byq); }
+                else { scalar_t gbx,gby; s_bself=trigrad(Fb,Mxb,Myb,Mb[0],Mb[1],Mb[4],Mb[5],bxq,byq,gbx,gby); scalar_t nbx=gbx*Kb[0]+gby*Kb[2], nby=gbx*Kb[1]+gby*Kb[3]; const scalar_t nlen=std::sqrt(nbx*nbx+nby*nby); const scalar_t invn=nlen>(scalar_t)0?(scalar_t)1/nlen:(scalar_t)0; nbx*=invn;nby*=invn; gpx=meas_p*nbx;gpy=meas_p*nby;gvx=meas_v*nbx;gvy=meas_v*nby; }
+                scalar_t wb=0;
+                if(soft){ scalar_t Z=0; for(int c=0;c<B;++c){ if(!covers(c,i,j)) continue; const scalar_t s_c=(c==b)?s_bself:phi_c(c,i,j); Z+=(scalar_t)1/((scalar_t)1+std::exp(s_c*inv_blend)); } if(Z>(scalar_t)0) wb=((scalar_t)1/((scalar_t)1+std::exp(s_bself*inv_blend)))/Z; }
+                else { scalar_t smin=(scalar_t)1e30; int bmin=-1; for(int c=0;c<B;++c){ if(!covers(c,i,j)) continue; const scalar_t s_c=(c==b)?s_bself:phi_c(c,i,j); if(s_c<smin){smin=s_c;bmin=c;} } wb=(bmin==b)?(scalar_t)1:(scalar_t)0; }
+                if(wb==(scalar_t)0) continue;
+                scalar_t fp_x=0,fp_y=0;
+                if(has_p){ const scalar_t p_c=p_p[g]; fp_x=-p_c*gpx; fp_y=-p_c*gpy; }
+                scalar_t fv_x=0,fv_y=0;
+                if(has_v){
+                    const scalar_t nu_rho_val=(nr_size==1)?nr_p[0]:nr_p[g];
+                    const int im1=(i>0)?i-1:0,ip1=(i+1<Ngx)?i+1:i,im2=(i>1)?i-2:0,ip2=(i+2<Ngx)?i+2:(Ngx-1);
+                    const int jm1=(j>0)?j-1:0,jp1=(j+1<Ngy)?j+1:j,jm2=(j>1)?j-2:0,jp2=(j+2<Ngy)?j+2:(Ngy-1);
+                    scalar_t dudx; if(i+1<Ngx) dudx=(u_p[ip1*Ngy+j]-u_p[i*Ngy+j])*inv_h_s; else dudx=(u_p[i*Ngy+j]-u_p[im1*Ngy+j])*inv_h_s;
+                    scalar_t dvdy; if(j+1<Ngy) dvdy=(v_p[i*Ngy+jp1]-v_p[i*Ngy+j])*inv_h_s; else dvdy=(v_p[i*Ngy+j]-v_p[i*Ngy+jm1])*inv_h_s;
+                    const scalar_t u_cc_jm2=(scalar_t)0.5*(u_p[i*Ngy+jm2]+u_p[ip1*Ngy+jm2]); const scalar_t u_cc_jm1=(scalar_t)0.5*(u_p[i*Ngy+jm1]+u_p[ip1*Ngy+jm1]); const scalar_t u_cc_j0=(scalar_t)0.5*(u_p[i*Ngy+j]+u_p[ip1*Ngy+j]); const scalar_t u_cc_jp1=(scalar_t)0.5*(u_p[i*Ngy+jp1]+u_p[ip1*Ngy+jp1]); const scalar_t u_cc_jp2=(scalar_t)0.5*(u_p[i*Ngy+jp2]+u_p[ip1*Ngy+jp2]);
+                    scalar_t dudy; if(Ngy>=3){ if(j==0) dudy=((scalar_t)(-3)*u_cc_j0+(scalar_t)4*u_cc_jp1-u_cc_jp2)*(scalar_t)0.5*inv_h_s; else if(j==Ngy-1) dudy=((scalar_t)3*u_cc_j0-(scalar_t)4*u_cc_jm1+u_cc_jm2)*(scalar_t)0.5*inv_h_s; else dudy=(u_cc_jp1-u_cc_jm1)*(scalar_t)0.5*inv_h_s; } else dudy=(u_cc_jp1-u_cc_jm1)*(scalar_t)0.5*inv_h_s;
+                    const scalar_t v_cc_im2=(scalar_t)0.5*(v_p[im2*Ngy+j]+v_p[im2*Ngy+jp1]); const scalar_t v_cc_im1=(scalar_t)0.5*(v_p[im1*Ngy+j]+v_p[im1*Ngy+jp1]); const scalar_t v_cc_i0=(scalar_t)0.5*(v_p[i*Ngy+j]+v_p[i*Ngy+jp1]); const scalar_t v_cc_ip1=(scalar_t)0.5*(v_p[ip1*Ngy+j]+v_p[ip1*Ngy+jp1]); const scalar_t v_cc_ip2=(scalar_t)0.5*(v_p[ip2*Ngy+j]+v_p[ip2*Ngy+jp1]);
+                    scalar_t dvdx; if(Ngx>=3){ if(i==0) dvdx=((scalar_t)(-3)*v_cc_i0+(scalar_t)4*v_cc_ip1-v_cc_ip2)*(scalar_t)0.5*inv_h_s; else if(i==Ngx-1) dvdx=((scalar_t)3*v_cc_i0-(scalar_t)4*v_cc_im1+v_cc_im2)*(scalar_t)0.5*inv_h_s; else dvdx=(v_cc_ip1-v_cc_im1)*(scalar_t)0.5*inv_h_s; } else dvdx=(v_cc_ip1-v_cc_im1)*(scalar_t)0.5*inv_h_s;
+                    const scalar_t sxx=nu_rho_val*(scalar_t)2*dudx, syy=nu_rho_val*(scalar_t)2*dvdy, sxy=nu_rho_val*(dudy+dvdx);
+                    fv_x=sxx*gvx+sxy*gvy; fv_y=sxy*gvx+syy*gvy;
                 }
-
-                const scalar_t nu_rho_val = (nr_size == 1) ? nr_p[0] : nr_p[g_idx];
-
-                scalar_t dsdx_union = 0;
-                if (Ngx >= 3) {
-                    if (i == 0) {
-                        dsdx_union = (
-                            (scalar_t)(-3) * sdf_cc_p[j]
-                            + (scalar_t)4 * sdf_cc_p[Ngy + j]
-                            - sdf_cc_p[2 * Ngy + j]
-                        ) * (scalar_t)0.5 * inv_h_s;
-                    } else if (i == Ngx - 1) {
-                        dsdx_union = (
-                            (scalar_t)3 * sdf_cc_p[(Ngx - 1) * Ngy + j]
-                            - (scalar_t)4 * sdf_cc_p[(Ngx - 2) * Ngy + j]
-                            + sdf_cc_p[(Ngx - 3) * Ngy + j]
-                        ) * (scalar_t)0.5 * inv_h_s;
-                    } else {
-                        dsdx_union = (
-                            sdf_cc_p[(i + 1) * Ngy + j]
-                            - sdf_cc_p[(i - 1) * Ngy + j]
-                        ) * (scalar_t)0.5 * inv_h_s;
-                    }
-                } else if (Ngx == 2) {
-                    dsdx_union = (sdf_cc_p[Ngy + j] - sdf_cc_p[j]) * inv_h_s;
-                }
-
-                scalar_t dsdy_union = 0;
-                if (Ngy >= 3) {
-                    const int row = i * Ngy;
-                    if (j == 0) {
-                        dsdy_union = (
-                            (scalar_t)(-3) * sdf_cc_p[row]
-                            + (scalar_t)4 * sdf_cc_p[row + 1]
-                            - sdf_cc_p[row + 2]
-                        ) * (scalar_t)0.5 * inv_h_s;
-                    } else if (j == Ngy - 1) {
-                        dsdy_union = (
-                            (scalar_t)3 * sdf_cc_p[row + (Ngy - 1)]
-                            - (scalar_t)4 * sdf_cc_p[row + (Ngy - 2)]
-                            + sdf_cc_p[row + (Ngy - 3)]
-                        ) * (scalar_t)0.5 * inv_h_s;
-                    } else {
-                        dsdy_union = (
-                            sdf_cc_p[row + (j + 1)]
-                            - sdf_cc_p[row + (j - 1)]
-                        ) * (scalar_t)0.5 * inv_h_s;
-                    }
-                } else if (Ngy == 2) {
-                    dsdy_union = (sdf_cc_p[i * Ngy + 1] - sdf_cc_p[i * Ngy]) * inv_h_s;
-                }
-
-                const scalar_t union_norm = std::sqrt(dsdx_union*dsdx_union + dsdy_union*dsdy_union);
-                const scalar_t union_inv_norm = union_norm > (scalar_t)0
-                    ? ((scalar_t)1.0 / union_norm)
-                    : (scalar_t)0;
-                const scalar_t nx = dsdx_union * union_inv_norm;
-                const scalar_t ny = dsdy_union * union_inv_norm;
-
-                const int im1 = (i > 0)         ? i-1 : 0;
-                const int ip1 = (i+1 < Ngx)     ? i+1 : i;
-                const int im2 = (i > 1)         ? i-2 : 0;
-                const int ip2 = (i+2 < Ngx)     ? i+2 : (Ngx - 1);
-                const int jm1 = (j > 0)         ? j-1 : 0;
-                const int jp1 = (j+1 < Ngy)     ? j+1 : j;
-                const int jm2 = (j > 1)         ? j-2 : 0;
-                const int jp2 = (j+2 < Ngy)     ? j+2 : (Ngy - 1);
-
-                scalar_t dudx;
-                if (i + 1 < Ngx) {
-                    dudx = (u_p[ip1 * Ngy + j] - u_p[i * Ngy + j]) * inv_h_s;
-                } else {
-                    dudx = (u_p[i * Ngy + j] - u_p[im1 * Ngy + j]) * inv_h_s;
-                }
-
-                scalar_t dvdy;
-                if (j + 1 < Ngy) {
-                    dvdy = (v_p[i * Ngy + jp1] - v_p[i * Ngy + j]) * inv_h_s;
-                } else {
-                    dvdy = (v_p[i * Ngy + j] - v_p[i * Ngy + jm1]) * inv_h_s;
-                }
-
-                const scalar_t u_cc_jm2 = (scalar_t)0.5 * (u_p[i * Ngy + jm2] + u_p[ip1 * Ngy + jm2]);
-                const scalar_t u_cc_jm1 = (scalar_t)0.5 * (u_p[i * Ngy + jm1] + u_p[ip1 * Ngy + jm1]);
-                const scalar_t u_cc_j0  = (scalar_t)0.5 * (u_p[i * Ngy + j  ] + u_p[ip1 * Ngy + j  ]);
-                const scalar_t u_cc_jp1 = (scalar_t)0.5 * (u_p[i * Ngy + jp1] + u_p[ip1 * Ngy + jp1]);
-                const scalar_t u_cc_jp2 = (scalar_t)0.5 * (u_p[i * Ngy + jp2] + u_p[ip1 * Ngy + jp2]);
-
-                scalar_t dudy;
-                if (Ngy >= 3) {
-                    if (j == 0) {
-                        dudy = ((scalar_t)(-3) * u_cc_j0 + (scalar_t)4 * u_cc_jp1 - u_cc_jp2)
-                             * (scalar_t)0.5 * inv_h_s;
-                    } else if (j == Ngy - 1) {
-                        dudy = ((scalar_t)3 * u_cc_j0 - (scalar_t)4 * u_cc_jm1 + u_cc_jm2)
-                             * (scalar_t)0.5 * inv_h_s;
-                    } else {
-                        dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h_s;
-                    }
-                } else {
-                    dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h_s;
-                }
-
-                const scalar_t v_cc_im2 = (scalar_t)0.5 * (v_p[im2 * Ngy + j] + v_p[im2 * Ngy + jp1]);
-                const scalar_t v_cc_im1 = (scalar_t)0.5 * (v_p[im1 * Ngy + j] + v_p[im1 * Ngy + jp1]);
-                const scalar_t v_cc_i0  = (scalar_t)0.5 * (v_p[i   * Ngy + j] + v_p[i   * Ngy + jp1]);
-                const scalar_t v_cc_ip1 = (scalar_t)0.5 * (v_p[ip1 * Ngy + j] + v_p[ip1 * Ngy + jp1]);
-                const scalar_t v_cc_ip2 = (scalar_t)0.5 * (v_p[ip2 * Ngy + j] + v_p[ip2 * Ngy + jp1]);
-
-                scalar_t dvdx;
-                if (Ngx >= 3) {
-                    if (i == 0) {
-                        dvdx = ((scalar_t)(-3) * v_cc_i0 + (scalar_t)4 * v_cc_ip1 - v_cc_ip2)
-                             * (scalar_t)0.5 * inv_h_s;
-                    } else if (i == Ngx - 1) {
-                        dvdx = ((scalar_t)3 * v_cc_i0 - (scalar_t)4 * v_cc_im1 + v_cc_im2)
-                             * (scalar_t)0.5 * inv_h_s;
-                    } else {
-                        dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h_s;
-                    }
-                } else {
-                    dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h_s;
-                }
-
-                const scalar_t xs = nu_rho_val * (2*dudx*nx + (dudy+dvdx)*ny);
-                const scalar_t ys = nu_rho_val * ((dvdx+dudy)*nx + 2*dvdy*ny);
-
-                const scalar_t p_c  = p_p[g_idx];
-                const scalar_t pxv  = -p_c * nx;
-                const scalar_t pyv  = -p_c * ny;
-
-                const scalar_t arm_x = xc - cm_x;
-                const scalar_t arm_y = yc - cm_y;
-
-                const double fv_x = (double)(xs  * delta_visc);
-                const double fv_y = (double)(ys  * delta_visc);
-                const double fp_x = (double)(pxv * delta_pres);
-                const double fp_y = (double)(pyv * delta_pres);
-
-                local8[0] += fv_x;
-                local8[1] += fv_y;
-                local8[2] += (double)arm_x * fv_y - (double)arm_y * fv_x;
-                local8[3] += fp_x;
-                local8[4] += fp_y;
-                local8[5] += (double)arm_x * fp_y - (double)arm_y * fp_x;
-            }
-            const int t = at::get_thread_num();
-            for (int c = 0; c < 6; ++c) tls[(size_t)t*6 + c] += local8[c];
-            });
-            for (int t = 0; t < nT; ++t)
-                for (int c = 0; c < 6; ++c) lb[c] += tls[(size_t)t*6 + c];
-        }
-
-        // ---- deltaH: union-∂H pressure force density, softmin partition ----
-        if (force_submethod != 0) {
-            const scalar_t inv_eps = (scalar_t)(1.0 / eps_body);
-            const double tau = (ph_tau > 0.0) ? ph_tau : 1e-9;
-            const scalar_t inv_tau = (scalar_t)(1.0 / tau);
-            auto sample_b = [&](const scalar_t* Fb, int Mx, int My, scalar_t bx0,
-                                scalar_t by0, scalar_t idx_, scalar_t idy_,
-                                scalar_t xq, scalar_t yq) -> scalar_t {
-                return (interp_method == 1)
-                    ? biquadratic_sample_uniform_2d<scalar_t>(Fb, Mx, My, bx0, by0, idx_, idy_, xq, yq)
-                    : bilinear_sample_uniform_2d<scalar_t>(Fb, Mx, My, bx0, by0, idx_, idy_, xq, yq);
-            };
-            int ulo[2] = {Ngx, Ngy}, uhi[2] = {0, 0};
-            for (int b = 0; b < B; ++b)
-                for (int d = 0; d < 2; ++d) { int a0=(int)lo[b*2+d]; int a1=a0+(int)dim_[b*2+d]; if(a0<ulo[d])ulo[d]=a0; if(a1>uhi[d])uhi[d]=a1; }
-            const int Ng[2] = {Ngx, Ngy}; const int halo = 2;
-            for (int d = 0; d < 2; ++d) { ulo[d]-=halo; if(ulo[d]<0)ulo[d]=0; uhi[d]+=halo; if(uhi[d]>Ng[d])uhi[d]=Ng[d]; }
-            auto Hs = [&](int i, int j) -> scalar_t {
-                scalar_t x = sdf_cc_p[(std::int64_t)i*Ngy+j] * inv_eps;
-                x = x < (scalar_t)-1 ? (scalar_t)-1 : (x > (scalar_t)1 ? (scalar_t)1 : x);
-                return (scalar_t)0.5 * ((scalar_t)1 + x + std::sin(pi_v * x) / pi_v);
-            };
-            for (int i = ulo[0]; i < uhi[0]; ++i)
-            for (int j = ulo[1]; j < uhi[1]; ++j) {
-                scalar_t gHx = 0, gHy = 0;
-                if (Ngx >= 3) { if(i==0) gHx=((-3)*Hs(0,j)+4*Hs(1,j)-Hs(2,j))*(scalar_t)0.5*inv_h_s; else if(i==Ngx-1) gHx=(3*Hs(Ngx-1,j)-4*Hs(Ngx-2,j)+Hs(Ngx-3,j))*(scalar_t)0.5*inv_h_s; else gHx=(Hs(i+1,j)-Hs(i-1,j))*(scalar_t)0.5*inv_h_s; } else if(Ngx==2) gHx=(Hs(1,j)-Hs(0,j))*inv_h_s;
-                if (Ngy >= 3) { if(j==0) gHy=((-3)*Hs(i,0)+4*Hs(i,1)-Hs(i,2))*(scalar_t)0.5*inv_h_s; else if(j==Ngy-1) gHy=(3*Hs(i,Ngy-1)-4*Hs(i,Ngy-2)+Hs(i,Ngy-3))*(scalar_t)0.5*inv_h_s; else gHy=(Hs(i,j+1)-Hs(i,j-1))*(scalar_t)0.5*inv_h_s; } else if(Ngy==2) gHy=(Hs(i,1)-Hs(i,0))*inv_h_s;
-                if (gHx == (scalar_t)0 && gHy == (scalar_t)0) continue;
-                const std::int64_t g = (std::int64_t)i*Ngy+j;
-                const scalar_t p_c = p_p[g];
-                const scalar_t fdx = -p_c*gHx, fdy = -p_c*gHy;
-                const scalar_t xc = gx_ptr[i], yc = gy_ptr[j];
-                const scalar_t sdfu = sdf_cc_p[g];
-                scalar_t Z = 0;
-                for (int b = 0; b < B; ++b) {
-                    const int i0=(int)lo[b*2],j0=(int)lo[b*2+1],Ai=(int)dim_[b*2],Aj=(int)dim_[b*2+1];
-                    if (i<i0||i>=i0+Ai||j<j0||j>=j0+Aj) continue;
-                    const scalar_t* Fb=F_ptr+F_off[b]; const int Mx=(int)shapes[b*2],My=(int)shapes[b*2+1];
-                    const scalar_t* M=meta+b*7; const scalar_t* K=kin_ptr+b*11;
-                    const scalar_t dxw=xc-K[4],dyw=yc-K[5];
-                    const scalar_t bxq=K[0]*dxw+K[1]*dyw, byq=K[2]*dxw+K[3]*dyw;
-                    Z += std::exp(-(sample_b(Fb,Mx,My,M[0],M[1],M[4],M[5],bxq,byq)-sdfu)*inv_tau);
-                }
-                if (Z <= (scalar_t)0) continue;
-                const scalar_t invZ = (scalar_t)1/Z;
-                for (int b = 0; b < B; ++b) {
-                    const int i0=(int)lo[b*2],j0=(int)lo[b*2+1],Ai=(int)dim_[b*2],Aj=(int)dim_[b*2+1];
-                    if (i<i0||i>=i0+Ai||j<j0||j>=j0+Aj) continue;
-                    const scalar_t* Fb=F_ptr+F_off[b]; const int Mx=(int)shapes[b*2],My=(int)shapes[b*2+1];
-                    const scalar_t* M=meta+b*7; const scalar_t* K=kin_ptr+b*11;
-                    const scalar_t dxw=xc-K[4],dyw=yc-K[5];
-                    const scalar_t bxq=K[0]*dxw+K[1]*dyw, byq=K[2]*dxw+K[3]*dyw;
-                    const scalar_t s_b=sample_b(Fb,Mx,My,M[0],M[1],M[4],M[5],bxq,byq);
-                    const scalar_t wb=std::exp(-(s_b-sdfu)*inv_tau)*invZ;
-                    const scalar_t fbx=wb*fdx,fby=wb*fdy;
-                    const scalar_t ax=xc-K[6],ay=yc-K[7];
-                    double* lb=accs.data()+(size_t)b*6;
-                    lb[3]+=(double)fbx; lb[4]+=(double)fby; lb[5]+=(double)ax*fby-(double)ay*fbx;
-                }
+                const scalar_t arm_x=xc-Kb[6], arm_y=yc-Kb[7];
+                const double fvx=(double)(wb*fv_x),fvy=(double)(wb*fv_y),fpx=(double)(wb*fp_x),fpy=(double)(wb*fp_y);
+                lb[0]+=fvx; lb[1]+=fvy; lb[2]+=(double)arm_x*fvy-(double)arm_y*fvx;
+                lb[3]+=fpx; lb[4]+=fpy; lb[5]+=(double)arm_x*fpy-(double)arm_y*fpx;
             }
         }
 

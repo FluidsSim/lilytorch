@@ -46,11 +46,6 @@ class SimConfig(_PoolConfig):
         self.save         = False
         self.n_iterations = int(os.environ.get("DIAG_N", 6000))
         self.bdim_nt      = self.n_iterations + 1
-        # The partition-∂H force readout needs the per-body SDFs maintained only
-        # on the python force path (the kernel-streaming path keeps the union SDF).
-        if (os.environ.get("DIAG_PHEAVI_PART", "0") == "1"
-                or os.environ.get("DIAG_PYTHON", "0") == "1"):
-            self.solver_method = "python"
         # DIAG_NO_ZPI=1: disable zero_pressure_inside so the single-phase force
         # band quadrature keeps the FULL band (interior half too), matching the
         # two-phase treatment -> isolates the band-interior quadrature difference.
@@ -129,9 +124,9 @@ class SimConfig(_PoolConfig):
                 "alpha_volume_compensate": True,
                 "air_transparent_body"   : False,
             }
-            # The pressure force readout is the SBP-clean union-∂H partition
-            # ("deltaH"), inherited from the _PoolConfig solver block
-            # (self.force_submethod); no per-step gauge anchor needed.
+            # The pressure force readout is the SBP-clean union-∂H band measure
+            # (force_link_normal='union', the default), inherited from the
+            # _PoolConfig solver block; no per-step gauge anchor needed.
         # DIAG_RHO_AIR: override the two-phase air density.  Set = rho_water
         # (1000) to remove the density interface entirely -> two-phase code path
         # + gravity but UNIFORM density (isolates the interface from gravity).
@@ -145,12 +140,6 @@ class SimConfig(_PoolConfig):
         # leak (not the flow) is what separates two-phase from single-phase.
         if os.environ.get("DIAG_TP_NOGRAVITY", "0") == "1":
             ext["config"]["bdim_yaml"]["solver"].pop("gravity", None)
-        # DIAG_PHEAVI_PART=1: run the union-∂H partition readout on the PYTHON
-        # force path (parity check vs the default native "deltaH"); needs
-        # solver_method='python' (set in __init__).
-        if os.environ.get("DIAG_PHEAVI_PART", "0") == "1":
-            tp = ext["config"]["bdim_yaml"]["solver"]["two_phase"]
-            tp["partial_heaviside_forces"] = True
         return ext
 
     def extra_simulation_extensions(self, output_folder):

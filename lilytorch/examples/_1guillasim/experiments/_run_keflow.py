@@ -119,11 +119,8 @@ class SimConfig(_PoolConfig):
             # Override the air density to probe the density-ratio dependence of
             # the gravity-on interface flow (parasitic-current hypothesis).
             tp["rho_air"] = float(os.environ["KEFLOW_RHOAIR"])
-        # KEFLOW_PHEAVI=1: partial-Heaviside (∂H) pressure-force readout
-        # (union-∂H force density split to links by a softmin partition of unity;
-        # the seam-free, SBP-clean weight).  Native-kernel equivalent:
-        # solver.force_submethod = "deltaH".
-        tp["partial_heaviside_forces"] = os.environ.get("KEFLOW_PHEAVI", "0") == "1"
+        # The seam-free, SBP-clean union-∂H pressure readout is now the native
+        # default (force_link_normal='union'); no per-run opt-in needed.
         # Toggle the fluid gravity body force.
         if os.environ.get("KEFLOW_NOGRAV", "0") == "1":
             solver.pop("gravity", None)

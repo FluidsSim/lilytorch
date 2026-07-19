@@ -7,8 +7,8 @@ by the native streaming bridge first (so the band / union-normal paths are
 exercised on a real union SDF), then the force readout consumes the same
 fields on both devices.
 
-Covers: ``force_submethod`` 0 (n·δ) and 1 (deltaH ∂H pressure), ``delta_order``
-1 and 2, scalar + full-field nu_rho, f32 + f64.
+Covers: ``force_submethod`` 0 (union n·δ) and 2 (sm2 per-body normal),
+``delta_order`` 1 and 2, scalar + full-field nu_rho, f32 + f64.
 
 Run:  pytest lilytorch/src/kernels/test_forces.py -v
 """
@@ -52,7 +52,7 @@ def _fill_union_sdf_2d(sc, dtype, dev, kin=None, aabb_lo=None, aabb_dim=None,
 
     ``kin``/``aabb_*``/``max_vol`` default to the scene's; pass the current
     step's values (and a persistent ``out``) to refresh the union in place,
-    exactly as BDIMhandler does every step — the deltaH readout requires
+    exactly as BDIMhandler does every step — the union readout requires
     ``sdf_cc`` and the AABBs to be CONSISTENT (a grown AABB over a stale
     union puts FAR cells inside the softmin partition → exp overflow)."""
     Ngx, Ngy = sc["Ngx"], sc["Ngy"]
@@ -128,9 +128,9 @@ def test_forces_2d_ndelta_cpu_eq_gpu(dtype, delta_order, scalar_nrho):
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 @pytest.mark.parametrize("delta_order", [1, 2])
-def test_forces_2d_deltaH_cpu_eq_gpu(dtype, delta_order):
-    g = _run_2d("cuda", dtype, 1, delta_order, False)
-    c = _run_2d("cpu", dtype, 1, delta_order, False)
+def test_forces_2d_sm2_cpu_eq_gpu(dtype, delta_order):
+    g = _run_2d("cuda", dtype, 2, delta_order, False)
+    c = _run_2d("cpu", dtype, 2, delta_order, False)
     _check(g, c, dtype)
 
 
@@ -203,78 +203,10 @@ def test_forces_3d_ndelta_cpu_eq_gpu(dtype, delta_order, scalar_nrho):
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 @pytest.mark.parametrize("delta_order", [1, 2])
-def test_forces_3d_deltaH_cpu_eq_gpu(dtype, delta_order):
-    g = _run_3d("cuda", dtype, 1, delta_order, False)
-    c = _run_3d("cpu", dtype, 1, delta_order, False)
+def test_forces_3d_sm2_cpu_eq_gpu(dtype, delta_order):
+    g = _run_3d("cuda", dtype, 2, delta_order, False)
+    c = _run_3d("cpu", dtype, 2, delta_order, False)
     _check(g, c, dtype)
-
-
-# ── Live NON-streaming python force path (forces_method2 python branch) ───────
-# The torch-tensor force path (``_forces_shared`` / ``_forces_body_batch`` in
-# forces.py) is NOT dead: it is the general fallback taken whenever the native
-# streaming buffers (``comp._kernel_step`` / ``_kernel_static_2d``) are absent —
-# i.e. any direct ``FluidSolver`` (no BDIMhandler), analytical composite bodies,
-# and the drag/lift validation benchmarks.  The 3c dedup only removed the dead
-# ``_forces_lagrangian_*_python_ref`` oracles; this locks the surviving path
-# end-to-end (finite, deterministic on CPU, and CPU == GPU parity).
-
-def _run_python_eulerian(device):
-    from lilytorch.tests.test_two_phase import (
-        _parity_pars, _taylor_green_ic, _set_ic, _step_n)
-    from lilytorch.src.solver import FluidSolver
-    body = ["lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.12)"]
-    pars = _parity_pars(2, 48, 2.0e-3, 1.0e-2, 1000.0, body)
-    pars["solver"]["use_gpu"] = (device == "cuda")
-    pars["solver"]["force_method"] = "eulerian"
-    sp = FluidSolver(pars, dtype=torch.float64, compute_forces=True)
-    _set_ic(sp, _taylor_green_ic(sp))
-    _step_n(sp, 5)
-    # confirms we exercised the python branch, not the native streaming readout
-    assert getattr(sp.composite_body, "_kernel_step", None) is None
-    return torch.tensor([
-        float(sp.friction_force_lin_x.reshape(-1)[0]),
-        float(sp.friction_force_lin_y.reshape(-1)[0]),
-        float(sp.pressure_force_x.reshape(-1)[0]),
-        float(sp.pressure_force_y.reshape(-1)[0]),
-    ], dtype=torch.float64)
-
-
-def test_python_eulerian_force_path_cpu_regression():
-    """Frozen CPU snapshot of the non-streaming python eulerian force readout
-    (float64 is deterministic).  Guards the load-bearing torch-tensor path that
-    has no other unit coverage.
-
-    The force *readout* path is stable; the frozen values track the pressure it
-    reads, so they have been re-frozen whenever the Poisson driver changed
-    (arithmetic-order roundoff, not convergence — each shift was ~1e-9
-    relative).
-
-    Re-frozen when the CPU Poisson moved onto the native
-    ``poisson_solve_multigrid_*`` C++ driver (the same one CUDA already used):
-    the pressure it reads shifts by ~2e-8 relative.  That unification also made
-    ``test_python_eulerian_force_path_cpu_eq_gpu`` pass, which had been failing
-    for as long as CPU and CUDA ran different V-cycles.
-
-    NOT re-frozen when the Poisson gauge moved to an interior-only mean (which
-    shifts this config's p by ~13): a closed-surface ∮p·n integral is
-    gauge-invariant, and these values did not move at rtol 1e-9.  That is the
-    intended check — if they HAD moved, something would be reading p absolutely.
-    """
-    got = _run_python_eulerian("cpu")
-    expected = torch.tensor(
-        [0.4901618826264682, -0.5369408657033692,
-         28.151615122937677, -11.757472849432448], dtype=torch.float64)
-    assert torch.allclose(got, expected, rtol=1e-9, atol=1e-11), \
-        f"python eulerian force drift: {got.tolist()} vs {expected.tolist()}"
-
-
-@SKIP_NO_CUDA
-def test_python_eulerian_force_path_cpu_eq_gpu():
-    """The non-streaming python force path is single-source across devices."""
-    c = _run_python_eulerian("cpu")
-    g = _run_python_eulerian("cuda")
-    assert torch.allclose(c, g, rtol=1e-8, atol=1e-8), \
-        f"CPU vs GPU python eulerian force: {c.tolist()} vs {g.tolist()}"
 
 
 # ── Streaming force readout: the ForcesPostGraph wrapper == the raw op ───────
@@ -326,7 +258,7 @@ def _graph_steps_2d(dtype, submethod=0):
         max_vol = int(aabb_dim.prod(dim=1).max())
         u.add_(0.01); p.mul_(1.001)         # live-data check
         # Re-stream the union SDF with the CURRENT pose/AABBs into the SAME
-        # buffer (as BDIMhandler does every step): the deltaH softmin needs
+        # buffer (as BDIMhandler does every step): the union softmin needs
         # sdf_cc consistent with the AABBs, and the graph needs the pointer
         # stable.
         _fill_union_sdf_2d(sc, dtype, dev, kin=kin, aabb_lo=aabb_lo,
@@ -354,7 +286,7 @@ def _graph_steps_2d(dtype, submethod=0):
 
 
 @SKIP_NO_CUDA
-@pytest.mark.parametrize("submethod", [0, 1])
+@pytest.mark.parametrize("submethod", [0, 2])
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 def test_forces_2d_graph_replay_eq_eager(dtype, submethod):
     fg = _graph_steps_2d(dtype, submethod)
@@ -421,7 +353,7 @@ def _graph_steps_3d(dtype, submethod=0):
 
 
 @SKIP_NO_CUDA
-@pytest.mark.parametrize("submethod", [0, 1])
+@pytest.mark.parametrize("submethod", [0, 2])
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 def test_forces_3d_graph_replay_eq_eager(dtype, submethod):
     fg = _graph_steps_3d(dtype, submethod)
@@ -712,7 +644,7 @@ def test_split_offsets_readouts_differ_only_by_the_area_jacobian(s_over_h):
          f"viscous {fv_e/fv_l:.5f} vs pressure {fp_e/fp_l:.5f}")
 
 
-@pytest.mark.parametrize("submethod", [0, 1])
+@pytest.mark.parametrize("submethod", [0, 2])
 def test_oracle_eulerian_pressure_matches_exact(submethod):
     """Case A: the eulerian pressure readout is accurate — both submethods."""
     sc = _oracle_scene(48, 1.0)
@@ -737,7 +669,7 @@ def test_oracle_lagrangian_matches_exact():
                                rel=0.01)
 
 
-@pytest.mark.parametrize("submethod", [0, 1])
+@pytest.mark.parametrize("submethod", [0, 2])
 def test_oracle_eulerian_viscous_reads_offset_surface(submethod):
     """PINS A KNOWN DEFECT — this assertion is meant to be flipped by a fix.
 
@@ -873,18 +805,19 @@ def test_oracle_eulerian_thinness_error_at_zero_shift():
 
 
 @pytest.mark.parametrize("g", [0.5, 1.0, 2.0])
-def test_delta_order2_applies_the_coarea_factor(g):
-    """delta_order=2 must MULTIPLY the delta by |∇φ| (coarea), not divide.
+def test_unified_ndelta_is_delta_order_independent(g):
+    """The unified union-∇H ndelta folds the coarea |∇φ| into the DISCRETE
+    Heaviside gradient ∂_iH(φ_union), so ``force_delta_order`` is INERT and the
+    exact force is recovered for ANY |∇φ|.
 
-    ∮_{φ=0} f dS = ∫ f δ(φ) |∇φ| dV, so a δ_ε(φ) volume integral without the
-    |∇φ| factor returns (true surface integral)/|∇φ|.  Order 2 supplies that
-    factor and must therefore recover the exact force for ANY |∇φ|.
+    (Legacy ndelta integrated δ_ε(φ_body) with no coarea factor and needed
+    delta_order=2 to MULTIPLY it back in — reading exact/|∇φ| at order 1.  The
+    union-∇H measure needs neither: ∫ g ∂_iH dV = ∮_{φ=0} g n_i dS exactly,
+    independent of how φ is scaled.)
 
-    The correction is inert at |∇φ| = 1 — which is why every analytical-body
-    test missed that it was inverted until 2026-07-16 (handoff §8 / §10.3c) —
-    so this drives a DELIBERATELY SCALED SDF φ = g·(r−R): the same sphere and
-    the same exact force, but |∇φ| = g.  Order 1 lands at exact/g; order 2 must
-    land on exact.  Before the fix, order 2 gave exact/g² instead.
+    Driven on a DELIBERATELY SCALED SDF φ = g·(r−R): same sphere, same exact
+    force, but |∇φ| = g.  Both delta orders must land on the exact force and be
+    bit-identical to each other.
     """
     exact = 2 * _ORC_NU * _ORC_RHO * _ORC_CSH * _ORC_V
     sc = _oracle_scene(64, 1.0)
@@ -895,7 +828,7 @@ def test_delta_order2_applies_the_coarea_factor(g):
     z = torch.zeros_like(sc["X"])
     args = (_ORC_CSH * sc["Y"] ** 2, z.clone(), z.clone(), z.clone())
 
-    f1 = _oracle_eulerian_shift(sc, *args, 0.0)          # order 1: exact/g
+    f1 = _oracle_eulerian_shift(sc, *args, 0.0)          # delta_order 1
     out = torch.zeros((1, 12), dtype=torch.float64)
     streaming_sdf_forces_post_3d(
         sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
@@ -905,25 +838,13 @@ def test_delta_order2_applies_the_coarea_factor(g):
         args[0].ravel().contiguous(), args[1].ravel().contiguous(),
         args[2].ravel().contiguous(), args[3].ravel().contiguous(),
         torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
-        # (eps_body, off_pres, off_visc): both channels unshifted, so the only
-        # thing under test is the coarea factor.
         sc["eps"], 0.0, 0.0, sc["h"] ** 3, 2, out, 0, 1.5 * sc["h"],
     )
     f2 = float(out[0, 0])
 
-    assert f1 == pytest.approx(exact / g, rel=0.06), \
-        f"|∇φ|={g}: order1 should read exact/|∇φ|, got {f1:.5e}"
+    assert f1 == pytest.approx(exact, rel=0.06), \
+        f"|∇φ|={g}: order1 union-∇H should read exact, got {f1:.5e}"
     assert f2 == pytest.approx(exact, rel=0.06), \
-        f"|∇φ|={g}: order2 must recover exact via the coarea factor, got {f2:.5e}"
-
-
-def test_oracle_deltaH_viscous_is_ndelta_viscous():
-    """deltaH only replaces the PRESSURE readout, so it cannot be a candidate
-    fix for the viscous offset above: the two viscous outputs are bit-identical.
-    """
-    sc = _oracle_scene(48, 1.0)
-    z = torch.zeros_like(sc["X"])
-    u = _ORC_CSH * sc["Y"] ** 2
-    fv0, _ = _oracle_eulerian(sc, 0, u, z.clone(), z.clone(), z.clone())
-    fv1, _ = _oracle_eulerian(sc, 1, u, z.clone(), z.clone(), z.clone())
-    assert fv0 == fv1
+        f"|∇φ|={g}: order2 union-∇H should read exact, got {f2:.5e}"
+    assert f1 == pytest.approx(f2, rel=1e-9), \
+        f"delta_order must be inert for union-∇H: {f1:.6e} vs {f2:.6e}"

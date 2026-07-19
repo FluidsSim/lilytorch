@@ -4,6 +4,14 @@ Everything for validating and comparing the two hydrodynamic force readouts. Sta
 `HANDOFF_NEXT_AGENT.md` — it carries the current state, what is trusted, what is **not**, and the
 planned work.
 
+> **Retired (2026-07-19):** the `deltaH` eulerian submethod and the legacy standalone **python**
+> eulerian force path are gone. The union `ndelta` readout (`force_submethod=0`, selected by
+> `solver.force_link_normal="union"`, the default) inherits deltaH's gauge fix — the two-phase gauge
+> tests confirm it — so deltaH is no longer needed. `sm2` (`force_submethod=2`,
+> `force_link_normal="body"`) survives as an analysis-only per-link-normal variant, **gauge-unsafe and
+> forbidden with the two-phase solver**. `force_submethod` has an intentional numbering gap (0, then 2)
+> where deltaH's `1` was. Historical `deltaH` numbers below are kept for the record.
+
 ## The two readouts, and the thing that makes comparing them hard
 
 |  | pressure sampled at | viscous (σ) sampled at |
@@ -25,7 +33,7 @@ can be pinned to identical sampling locations and the *readout* difference isola
 ### Analytic oracles — absolute accuracy (no reference run needed)
 | script | what it does |
 |---|---|
-| `oracle_native_three_way.py` | ndelta vs deltaH vs lagrangian on an exact sphere with closed-form answers (divergence theorem). Drives the **native** op — the production path. Prints ratio-to-exact vs R/h and eps. |
+| `oracle_native_three_way.py` | ndelta (union-∇H, `force_submethod=0`) vs sm2 (union coarea × per-body normal, `force_submethod=2`) vs lagrangian on an exact sphere with closed-form answers (divergence theorem). Drives the **native** op — the production path. Prints ratio-to-exact vs R/h and eps. |
 | `oracle_python_path.py` | same two analytic cases through a real `FluidSolver` (python path). |
 
 The same cases are pinned as **physics** tests in `lilytorch/tests/test_forces.py::test_oracle_*`

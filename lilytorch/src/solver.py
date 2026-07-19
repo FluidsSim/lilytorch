@@ -22,10 +22,6 @@ from lilytorch.src.plotting import PlottingMixin
 from lilytorch.src.poisson_fft import PoissonSolverFFT
 from lilytorch.src.poisson_mult import PoissonSolver
 from lilytorch.util.yaml_operations import pyobject2yaml
-from lilytorch.src.forces import (
-    _forces_shared, _forces_body_batch,
-    _forces_body_integrate_3d,
-)
 from lilytorch.src import forces, extras
 from lilytorch.src.graph_capture import NativeWholeStepGraphRunner
 
@@ -388,32 +384,40 @@ class FluidSolver(PlottingMixin):
                 f"('eulerian', 'lagrangian'), got {_fm_raw!r}."
             )
         self.force_method = _fm_raw
-        # Eulerian pressure-force readout sub-method (only meaningful when
-        # ``force_method == "eulerian"``):
+        # Eulerian force readout: which normal the per-link split rides on (only
+        # meaningful when ``force_method == "eulerian"``).  BOTH channels are
+        # always read on the UNION smoothed-Heaviside band measure ∂_iH_ε(φ_union)
+        # — one closed surface with no internal inter-link seams, so the net obeys
+        # summation-by-parts and never leaks the hydrostatic baseline — and the
+        # union force is split back to the individual links by a softmin partition
+        # of unity keyed on the body-velocity blend width.
         #
-        #   "ndelta" — F = -Σ p·n·δ_ε(φ_body)  (per-body smoothed-delta band
-        #              integral; the historical default).
-        #   "deltaH" — F = -Σ p·∂_iH_ε(φ_union)  partial-Heaviside readout: the
-        #              pressure force density is taken from the UNION SDF (one
-        #              closed surface, no internal inter-link seams) so it obeys
-        #              summation-by-parts and does not leak the hydrostatic
-        #              baseline; it is split back to the individual bodies by a
-        #              softmin partition of unity (w_b = softmax(-φ_b/τ),
-        #              τ = ``force_ph_blend_cells``·h).  Viscous force/torque are
-        #              unchanged (still the per-body δ_ε integral).
+        #   "union" — F_i = union band measure × the union ∂_iH direction.  The
+        #             net is exact by summation-by-parts and the readout is
+        #             gauge-safe (constant p → 0), so this is the default and the
+        #             only readout allowed with the two-phase solver.
+        #   "body"  — F_i = union coarea magnitude × each link's own ANALYTIC
+        #             surface normal.  More accurate per-link forces on thin /
+        #             multi-link bodies, but gauge-UNSAFE (constant p leaks a
+        #             large spurious force), so it is analysis-only and forbidden
+        #             with the two-phase solver.
         #
-        # Mirrors ``TwoPhaseSolver._apply_partition_heaviside`` (python path) in
-        # the native CUDA/CPU force kernels.
-        _fsm_raw = solver.get("force_submethod", "ndelta")
-        if _fsm_raw not in ("ndelta", "deltaH"):
+        # Maps to the native op's ``force_submethod`` int (0 = union, 2 = body;
+        # value 1 was the retired deltaH readout — hence the numbering gap).
+        _fln_raw = solver.get("force_link_normal", "union")
+        if _fln_raw not in ("union", "body"):
             raise ValueError(
-                f"solver.force_submethod must be one of "
-                f"('ndelta', 'deltaH'), got {_fsm_raw!r}."
+                f"solver.force_link_normal must be one of "
+                f"('union', 'body'), got {_fln_raw!r}."
             )
-        self.force_submethod = _fsm_raw
-        # Softmin partition temperature for the deltaH readout, in grid cells.
-        self.force_ph_blend_cells = float(
-            solver.get("force_ph_blend_cells", 1.5))
+        self.force_link_normal = _fln_raw
+        self.force_submethod = 0 if _fln_raw == "union" else 2
+        if self.force_submethod == 2 and solver.get("two_phase") is not None:
+            raise ValueError(
+                "force_link_normal='body' (per-body analytic normal, sm2) is "
+                "gauge-unsafe (constant p leaks a spurious force) and must not "
+                "be used with the two-phase solver; use 'union'."
+            )
         # Distance to offset the Lagrangian-force sample point along the
         # outward surface normal (see lagrangian_forces.cu).  0 (default)
         # = sample exactly at the centroid/contour marker (legacy
@@ -513,11 +517,6 @@ class FluidSolver(PlottingMixin):
         #     )
 
         self._mu_normals_dyn_compiled = _mu_normals_batched
-
-        self._forces_shared_compiled     = _forces_shared
-        self._forces_body_batch_compiled = _forces_body_batch
-        self._forces_shared_dyn_compiled = _forces_shared
-        self._forces_body_compiled       = _forces_body_integrate_3d
 
         # =============  poisson solver =============
         self.poisson_method = solver.get("poisson_method", "multigrid")

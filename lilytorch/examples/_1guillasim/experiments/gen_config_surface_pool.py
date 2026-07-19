@@ -30,10 +30,9 @@ class SimConfig(BaseSimConfig):
         # instead of sinking to the floor. (Lagrangian wins only when the body
         # is well resolved.)
         self.force_method                  = "eulerian"
-        # Partial-Heaviside (∂H) pressure-force readout: union-∂H density split
-        # to links by a softmin partition of unity — seam-free, no hydrostatic
-        # baseline leak (vs the default per-body n·δ band integral).
-        self.force_submethod               = "deltaH"
+        # The eulerian readout now defaults to the union-∂H band measure for BOTH
+        # channels (force_link_normal='union'): seam-free, no hydrostatic baseline
+        # leak — the gauge property the retired deltaH submethod used to provide.
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = False

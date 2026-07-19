@@ -68,8 +68,9 @@ def _capture(self, u, v, w, p, iteration):
         "nu": float(self.nu), "rho": float(self.rho),
         "delta_order": int(self.force_delta_order),
         "interp_method": int(getattr(self, "_sdf_interp_method", 0)),
-        "force_submethod": getattr(self, "force_submethod", "ndelta"),
-        "ph_blend_cells": float(getattr(self, "force_ph_blend_cells", 1.5)),
+        # 0 = union ndelta (default), 2 = per-body analytic normal (sm2)
+        "force_submethod": int(getattr(self, "force_submethod", 0)),
+        "ph_blend_cells": float(getattr(self, "_body_vel_blend_cells", 0.0)),
         "n_bodies": len(comp.bodies),
         "iteration": int(iteration),
         # padded grid dims (nx = Nx + 2 ghosts), which is what the flat fields
