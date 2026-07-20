@@ -25,6 +25,8 @@ import torch
 from lilytorch.src.native import (
     lagrangian_forces_2d as _lagrangian_forces_2d_kernel,
     lagrangian_forces_3d as _lagrangian_forces_3d_kernel,
+    streaming_sdf_forces_post_2d,
+    streaming_sdf_forces_post_3d,
 )
 
 
@@ -35,143 +37,83 @@ from lilytorch.src.native import (
 
 def forces_method2(self, u, v, p, iteration):
     comp = self.composite_body
-    # 2-D update-time force caches are intentionally ignored here.
-    # The current-step force pass below recomputes forces from the same
-    # streamed geometry using post-fluid-step u/v/p.
-    if getattr(comp, '_combined_forces_out', None) is not None:
-        comp._combined_forces_out = None
-
     B = len(comp.bodies)
 
     _stream_step = getattr(comp, '_kernel_step', None)
-    _have_sparse_2d = (
-        hasattr(comp, '_sdf_sparse')
-        and len(comp._sdf_sparse) > 0
-        and comp._sdf_sparse[0] is not None
-    )
-    _use_kernel_post_forces_2d = (
-        not _have_sparse_2d
-        and _stream_step is not None
-        and getattr(comp, '_kernel_static_2d', None) is not None
-    )
+    sm = getattr(comp, '_kernel_static_2d', None)
+    if _stream_step is None or sm is None:
+        return  # streaming metadata not available (non-streaming body)
 
-    if _use_kernel_post_forces_2d:
+    out2d = getattr(self, '_kernel_post_out_buf_2d', None)
+    _fresh_out = out2d is None or out2d.shape != (B, 6)
+    if _fresh_out:
+        out2d = torch.zeros((B, 6), dtype=torch.float64, device=self.device)
+        self._kernel_post_out_buf_2d = out2d
 
-        sm = comp._kernel_static_2d
-
-        out2d = getattr(self, '_kernel_post_out_buf_2d', None)
-        _fresh_out = out2d is None or out2d.shape != (B, 6)
-        if _fresh_out:
-            out2d = torch.zeros((B, 6), dtype=torch.float64, device=self.device)
-            self._kernel_post_out_buf_2d = out2d
-
-        if self.use_variable_viscosity:
-            nu_rho_field = self._compute_nu_rho_for_forces(u, v)
-        else:
-            nu_rho_scalar = getattr(self, '_kernel_post_nu_rho_scalar_2d', None)
-            if nu_rho_scalar is None:
-                nu_rho_scalar = torch.empty(
-                    (1,), device=self.device, dtype=self.dtype,
-                )
-                # nu/rho are constant for the run (variable viscosity takes the
-                # branch above): fill ONCE — float(gpu_tensor) is a device sync.
-                nu_rho_scalar.fill_(self._cached_float('nu', self.nu)
-                                    * self._cached_float('rho', self.rho))
-                self._kernel_post_nu_rho_scalar_2d = nu_rho_scalar
-            nu_rho_field = nu_rho_scalar
-
-        # Scalar kernel params must be python floats: passing a 0-d GPU tensor
-        # forces a host-side conversion per launch (= a hidden device sync).
-        # eps is the single BDIM half-width authority (solver.eps = eps_multiplier * h).
-        eps_body = self._cached_float('eps', comp.eps)
-        interp_method = int(getattr(self, '_sdf_interp_method', 0))
-        # 0 = union ndelta (default), 2 = per-body analytic normal (sm2).
-        _fsm = int(getattr(self, 'force_submethod', 0))
-        # Both readouts split the union force to links by the body-velocity blend
-        # partition, so the ph_tau slot carries that blend width (in metres).
-        _ph_tau = (float(getattr(self, '_body_vel_blend_cells', 0.0))
-                   * self._cached_float('h', self.h))
-
-        # CUDA-graph replay — the default readout path on CUDA.  Both
-        # submethods are static-dim (full-grid launch).
-        # Variable viscosity is now graph-safe: nu_rho_field is staged into a
-        # persistent buffer inside ForcesPostGraph._stage() so its pointer
-        # is stable across steps.
-        # The wrapper owns the out-zeroing and degrades to the eager launch
-        # (never to wrong results) if live pointers churn.
-        _use_fgraph = u.is_cuda
-        if _use_fgraph:
-            fg = getattr(self, '_forces_post_graph_2d', None)
-            if fg is None:
-                fg = ForcesPostGraph(2)
-                self._forces_post_graph_2d = fg
-            # u/v pointers churn step-to-step (fluid_step reallocates), which
-            # would defeat the signature cache — but at this call site
-            # ``self.u0, self.v0 = u, v`` has just COPIED them into the
-            # persistent ``self._vel`` rows (the u0/v0 setters), so those are
-            # pointer-stable, content-identical aliases.  p's storage is
-            # allocator-stable in practice; the signature cache absorbs it.
-            fg.run(
-                sm['F_flat'], sm['F_offsets'],
-                sm['body_shapes'], sm['body_meta'], _stream_step['kin'],
-                _stream_step['aabb_lo'], _stream_step['aabb_dim'],
-                (_stream_step['gx'], _stream_step['gy']),
-                self._cached_float('h', self.h), _stream_step['max_vol'],
-                comp.sdf_val, interp_method,
-                (self._vel[0], self._vel[1]), p.contiguous(),
-                nu_rho_field,
-                eps_body,
-                self._cached_float('off_p', self.eul_sample_offset_pressure),
-                self._cached_float('off_f', self.eul_sample_offset_friction),
-                self._cached_float('h2', self.h2),
-                self.force_delta_order,
-                out2d,
-                _fsm, _ph_tau,
+    if self.use_variable_viscosity:
+        nu_rho_field = self._compute_nu_rho_for_forces(u, v)
+    else:
+        nu_rho_scalar = getattr(self, '_kernel_post_nu_rho_scalar_2d', None)
+        if nu_rho_scalar is None:
+            nu_rho_scalar = torch.empty(
+                (1,), device=self.device, dtype=self.dtype,
             )
-        else:
-            if not _fresh_out:
-                out2d.zero_()
-            streaming_sdf_forces_post_2d(
-                sm['F_flat'], sm['F_offsets'],
-                sm['body_shapes'], sm['body_meta'], _stream_step['kin'],
-                _stream_step['aabb_lo'], _stream_step['aabb_dim'],
-                _stream_step['gx'], _stream_step['gy'],
-                self._cached_float('h', self.h), _stream_step['max_vol'],
-                comp.sdf_val,
-                interp_method,
-                u.contiguous(), v.contiguous(), p.contiguous(),
-                nu_rho_field,
-                eps_body,
-                self._cached_float('off_p', self.eul_sample_offset_pressure),
-                self._cached_float('off_f', self.eul_sample_offset_friction),
-                self._cached_float('h2', self.h2),
-                self.force_delta_order,
-                out2d,
-                _fsm, _ph_tau,
-            )
+            # nu/rho are constant for the run (variable viscosity takes the
+            # branch above): fill ONCE — float(gpu_tensor) is a device sync.
+            nu_rho_scalar.fill_(self._cached_float('nu', self.nu)
+                                * self._cached_float('rho', self.rho))
+            self._kernel_post_nu_rho_scalar_2d = nu_rho_scalar
+        nu_rho_field = nu_rho_scalar
 
-        out_s = out2d if out2d.dtype == u.dtype else out2d.to(u.dtype)
-        self.viscous_drag_record[:B, 0, iteration]  = out_s[:, 0]
-        self.viscous_drag_record[:B, 1, iteration]  = out_s[:, 1]
-        self.pressure_drag_record[:B, 0, iteration] = out_s[:, 3]
-        self.pressure_drag_record[:B, 1, iteration] = out_s[:, 4]
-        self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
-        self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
-        self.friction_force_ang_z = out_s[:, 2].clone()
-        self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
-        self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
-        self.pressure_force_ang_z = out_s[:, 5].clone()
-        self.xstress_tensor = None
-        self.ystress_tensor = None
-        self.pforce_x = None
-        self.pforce_y = None
-        return
+    # Scalar kernel params must be python floats: passing a 0-d GPU tensor
+    # forces a host-side conversion per launch (= a hidden device sync).
+    # eps is the single BDIM half-width authority (solver.eps = eps_multiplier * h).
+    eps_body = self._cached_float('eps', comp.eps)
+    interp_method = int(getattr(self, '_sdf_interp_method', 0))
+    # 0 = union ndelta (default), 2 = per-body analytic normal (sm2).
+    _fsm = int(getattr(self, 'force_submethod', 0))
+    # Both readouts split the union force to links by the body-velocity blend
+    # partition, so the ph_tau slot carries that blend width (in metres).
+    _ph_tau = (float(getattr(self, '_body_vel_blend_cells', 0.0))
+               * self._cached_float('h', self.h))
 
-    raise RuntimeError(
-        "eulerian forces require the native streaming path; standalone "
-        "python bodies are no longer supported — use the FARMS/BDIMhandler "
-        "path"
+    if not _fresh_out:
+        out2d.zero_()
+    streaming_sdf_forces_post_2d(
+        sm['F_flat'], sm['F_offsets'],
+        sm['body_shapes'], sm['body_meta'], _stream_step['kin'],
+        _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+        _stream_step['gx'], _stream_step['gy'],
+        self._cached_float('h', self.h), _stream_step['max_vol'],
+        comp.sdf_val,
+        interp_method,
+        u.contiguous(), v.contiguous(), p.contiguous(),
+        nu_rho_field,
+        eps_body,
+        self._cached_float('off_p', self.eul_sample_offset_pressure),
+        self._cached_float('off_f', self.eul_sample_offset_friction),
+        self._cached_float('h2', self.h2),
+        self.force_delta_order,
+        out2d,
+        _fsm, _ph_tau,
     )
+
+    out_s = out2d if out2d.dtype == u.dtype else out2d.to(u.dtype)
+    self.viscous_drag_record[:B, 0, iteration]  = out_s[:, 0]
+    self.viscous_drag_record[:B, 1, iteration]  = out_s[:, 1]
+    self.pressure_drag_record[:B, 0, iteration] = out_s[:, 3]
+    self.pressure_drag_record[:B, 1, iteration] = out_s[:, 4]
+    self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
+    self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
+    self.friction_force_ang_z = out_s[:, 2].clone()
+    self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
+    self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
+    self.pressure_force_ang_z = out_s[:, 5].clone()
+    self.xstress_tensor = None
+    self.ystress_tensor = None
+    self.pforce_x = None
+    self.pforce_y = None
+    return
 
 
 # ==================================================================
@@ -186,13 +128,13 @@ def forces_method2_3d(self, u, v, w, p, iteration):
 
     Viscous force::
 
-        F_visc = ∫ (σ · n) δ_ε(d - ε) dV
+    F_visc = ∫ (σ · n) δ_ε(d - ε) dV
 
     where σ_{ij} = ν ρ (∂u_i/∂x_j + ∂u_j/∂x_i) is the viscous stress.
 
     Pressure force::
 
-        F_pres = -∫ p n δ_ε(d) dV
+    F_pres = -∫ p n δ_ε(d) dV
 
     Torques are computed about each body's centre of mass via r × f.
     """
@@ -206,121 +148,81 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     # ============================================================
     _stream_step = getattr(comp, '_kernel_step', None)
     _stream_static = getattr(comp, '_kernel_static_3d', None)
-    _use_kernel_post = (
-        _stream_step is not None
-        and _stream_static is not None
+    if _stream_step is None or _stream_static is None:
+        return  # streaming metadata not available (non-streaming body)
+    B = len(comp.bodies)
+    out = getattr(self, '_kernel_post_out_buf_3d', None)
+    _fresh_out = out is None or out.shape != (B, 12)
+    if _fresh_out:
+        out = torch.zeros((B, 12), dtype=torch.float64, device=self.device)
+        self._kernel_post_out_buf_3d = out
+
+    if self.use_variable_viscosity:
+        nu_rho_field = self._compute_nu_rho_for_forces(u, v, w)
+    else:
+        nu_rho_scalar = getattr(self, '_kernel_post_nu_rho_scalar_3d', None)
+        if nu_rho_scalar is None:
+            nu_rho_scalar = torch.empty((1,), device=self.device, dtype=self.dtype)
+            # nu/rho are constant for the run (variable viscosity takes the
+            # branch above): fill ONCE — float(gpu_tensor) is a device sync.
+            nu_rho_scalar.fill_(self._cached_float('nu', self.nu)
+                                * self._cached_float('rho', self.rho))
+            self._kernel_post_nu_rho_scalar_3d = nu_rho_scalar
+        nu_rho_field = nu_rho_scalar
+
+    # Scalar kernel params must be python floats — see the 2-D twin.
+    # eps is the single BDIM half-width authority (solver.eps = eps_multiplier * h).
+    eps_body = self._cached_float('eps', comp.eps)
+    # 0 = union ndelta (default), 2 = per-body analytic normal (sm2).  Both
+    # split the union force to links by the SAME partition of unity the
+    # streaming body-velocity blend uses, so the ph_tau slot carries
+    # ``body_velocity_blend_eps_cells`` (<=0 -> hard nearest-body winner).
+    _fsm = int(getattr(self, 'force_submethod', 0))
+    _ph_tau = (float(getattr(self, '_body_vel_blend_cells', 0.0))
+               * self._cached_float('h', self.h))
+    if not _fresh_out:
+        out.zero_()
+    streaming_sdf_forces_post_3d(
+        _stream_static['F_flat'], _stream_static['F_offsets'],
+        _stream_static['body_shapes'], _stream_static['body_meta'],
+        _stream_step['kin'], _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+        _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
+        self._cached_float('h', self.h), _stream_step['max_vol'],
+        comp.sdf_val,
+        getattr(self, '_sdf_interp_method', 0),
+        u.contiguous(), v.contiguous(), w.contiguous(), p.contiguous(),
+        nu_rho_field,
+        eps_body,
+        self._cached_float('off_p', self.eul_sample_offset_pressure),
+        self._cached_float('off_f', self.eul_sample_offset_friction),
+        self._cached_float('h3', self.h3),
+        self.force_delta_order, out,
+        _fsm, _ph_tau,
     )
-    if _use_kernel_post:
-        B = len(comp.bodies)
-        out = getattr(self, '_kernel_post_out_buf_3d', None)
-        _fresh_out = out is None or out.shape != (B, 12)
-        if _fresh_out:
-            out = torch.zeros((B, 12), dtype=torch.float64, device=self.device)
-            self._kernel_post_out_buf_3d = out
-
-        if self.use_variable_viscosity:
-            nu_rho_field = self._compute_nu_rho_for_forces(u, v, w)
-        else:
-            nu_rho_scalar = getattr(self, '_kernel_post_nu_rho_scalar_3d', None)
-            if nu_rho_scalar is None:
-                nu_rho_scalar = torch.empty((1,), device=self.device, dtype=self.dtype)
-                # nu/rho are constant for the run (variable viscosity takes the
-                # branch above): fill ONCE — float(gpu_tensor) is a device sync.
-                nu_rho_scalar.fill_(self._cached_float('nu', self.nu)
-                                    * self._cached_float('rho', self.rho))
-                self._kernel_post_nu_rho_scalar_3d = nu_rho_scalar
-            nu_rho_field = nu_rho_scalar
-
-        # Scalar kernel params must be python floats — see the 2-D twin.
-        # eps is the single BDIM half-width authority (solver.eps = eps_multiplier * h).
-        eps_body = self._cached_float('eps', comp.eps)
-        # 0 = union ndelta (default), 2 = per-body analytic normal (sm2).  Both
-        # split the union force to links by the SAME partition of unity the
-        # streaming body-velocity blend uses, so the ph_tau slot carries
-        # ``body_velocity_blend_eps_cells`` (<=0 -> hard nearest-body winner).
-        _fsm = int(getattr(self, 'force_submethod', 0))
-        _ph_tau = (float(getattr(self, '_body_vel_blend_cells', 0.0))
-                   * self._cached_float('h', self.h))
-        # CUDA-graph replay — the default readout path on CUDA.  Variable
-        # viscosity is now graph-safe (nu_rho staged inside ForcesPostGraph).
-        _use_fgraph = u.is_cuda
-        if _use_fgraph:
-            fg = getattr(self, '_forces_post_graph_3d', None)
-            if fg is None:
-                fg = ForcesPostGraph(3)
-                self._forces_post_graph_3d = fg
-            # Velocities via the persistent ``self._vel`` rows — pointer-
-            # stable, content-identical to u/v/w here (see the 2-D twin).
-            fg.run(
-                _stream_static['F_flat'], _stream_static['F_offsets'],
-                _stream_static['body_shapes'], _stream_static['body_meta'],
-                _stream_step['kin'], _stream_step['aabb_lo'],
-                _stream_step['aabb_dim'],
-                (_stream_step['gx'], _stream_step['gy'], _stream_step['gz']),
-                self._cached_float('h', self.h), _stream_step['max_vol'],
-                comp.sdf_val,
-                int(getattr(self, '_sdf_interp_method', 0)),
-                (self._vel[0], self._vel[1], self._vel[2]),
-                p.contiguous(),
-                nu_rho_field,
-                eps_body,
-                self._cached_float('off_p', self.eul_sample_offset_pressure),
-                self._cached_float('off_f', self.eul_sample_offset_friction),
-                self._cached_float('h3', self.h3),
-                self.force_delta_order,
-                out,
-                _fsm, _ph_tau,
-            )
-        else:
-            if not _fresh_out:
-                out.zero_()
-            streaming_sdf_forces_post_3d(
-                _stream_static['F_flat'], _stream_static['F_offsets'],
-                _stream_static['body_shapes'], _stream_static['body_meta'],
-                _stream_step['kin'], _stream_step['aabb_lo'], _stream_step['aabb_dim'],
-                _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
-                self._cached_float('h', self.h), _stream_step['max_vol'],
-                comp.sdf_val,
-                getattr(self, '_sdf_interp_method', 0),
-                u.contiguous(), v.contiguous(), w.contiguous(), p.contiguous(),
-                nu_rho_field,
-                eps_body,
-                self._cached_float('off_p', self.eul_sample_offset_pressure),
-                self._cached_float('off_f', self.eul_sample_offset_friction),
-                self._cached_float('h3', self.h3),
-                self.force_delta_order, out,
-                _fsm, _ph_tau,
-            )
-        out_s = out if out.dtype == u.dtype else out.to(u.dtype)
-        self.viscous_drag_record[:B, :, iteration]    = out_s[:, 0:3]
-        self.viscous_torque_record[:B, :, iteration]  = out_s[:, 3:6]
-        self.pressure_drag_record[:B, :, iteration]   = out_s[:, 6:9]
-        self.pressure_torque_record[:B, :, iteration] = out_s[:, 9:12]
-        self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
-        self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
-        self.friction_force_lin_z = self.viscous_drag_record[:B, 2, iteration]
-        self.friction_force_ang_x = self.viscous_torque_record[:B, 0, iteration]
-        self.friction_force_ang_y = self.viscous_torque_record[:B, 1, iteration]
-        self.friction_force_ang_z = self.viscous_torque_record[:B, 2, iteration]
-        self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
-        self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
-        self.pressure_force_z     = self.pressure_drag_record[:B, 2, iteration]
-        self.pressure_force_ang_x = self.pressure_torque_record[:B, 0, iteration]
-        self.pressure_force_ang_y = self.pressure_torque_record[:B, 1, iteration]
-        self.pressure_force_ang_z = self.pressure_torque_record[:B, 2, iteration]
-        self.xstress_tensor = None
-        self.ystress_tensor = None
-        self.zstress_tensor = None
-        self.pforce_x = None
-        self.pforce_y = None
-        self.pforce_z = None
-        return
-
-    raise RuntimeError(
-        "eulerian forces require the native streaming path; standalone "
-        "python bodies are no longer supported — use the FARMS/BDIMhandler "
-        "path"
-    )
+    out_s = out if out.dtype == u.dtype else out.to(u.dtype)
+    self.viscous_drag_record[:B, :, iteration]    = out_s[:, 0:3]
+    self.viscous_torque_record[:B, :, iteration]  = out_s[:, 3:6]
+    self.pressure_drag_record[:B, :, iteration]   = out_s[:, 6:9]
+    self.pressure_torque_record[:B, :, iteration] = out_s[:, 9:12]
+    self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
+    self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
+    self.friction_force_lin_z = self.viscous_drag_record[:B, 2, iteration]
+    self.friction_force_ang_x = self.viscous_torque_record[:B, 0, iteration]
+    self.friction_force_ang_y = self.viscous_torque_record[:B, 1, iteration]
+    self.friction_force_ang_z = self.viscous_torque_record[:B, 2, iteration]
+    self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
+    self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
+    self.pressure_force_z     = self.pressure_drag_record[:B, 2, iteration]
+    self.pressure_force_ang_x = self.pressure_torque_record[:B, 0, iteration]
+    self.pressure_force_ang_y = self.pressure_torque_record[:B, 1, iteration]
+    self.pressure_force_ang_z = self.pressure_torque_record[:B, 2, iteration]
+    self.xstress_tensor = None
+    self.ystress_tensor = None
+    self.zstress_tensor = None
+    self.pforce_x = None
+    self.pforce_y = None
+    self.pforce_z = None
+    return
 
 
 # ======================================================================
@@ -742,141 +644,3 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
     self.pforce_z = None
 
 
-# The Eulerian streaming force readout — the union ∂H viscous+pressure band
-# integral, split to links by the body-velocity blend partition — is a native
-# CUDA / C++ op with an ``at::parallel_for`` CPU twin (see ops.cpp).  These are
-# the in-module aliases
-# (historical short names) used by the force_method2 call sites above.
-from lilytorch.src.native import (
-    streaming_sdf_forces_post_2d as streaming_sdf_forces_post_2d,
-    streaming_sdf_forces_post_3d as streaming_sdf_forces_post_3d,
-)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  CUDA-graph replay for the streaming Eulerian force readout (opt-in)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class ForcesPostGraph:
-    """CUDA-graph replay around the streaming force readout — the DEFAULT
-    path on CUDA (``forces_post_union_blend_{2,3}d_kernel``).
-
-    Every launch in the readout is static-shape by design: the union-band fan is
-    ``B * max_vol`` with each thread decoding its (body, cell) from the
-    device-resident ``aabb_lo``/``aabb_dim`` tables (early-returning past the
-    body's actual AABB volume).  Replaying with the fan dim frozen at a grow-only
-    ``max_vol`` watermark is therefore correct for any pose whose per-body
-    AABB volume is <= the watermark; growth drops the captured graphs and the
-    next sighting recaptures (same contract as the streaming ``body_update``
-    graph path).
-
-    Per-step pose data (``kin``/``aabb_lo``/``aabb_dim`` arrive as FRESH
-    device tensors each step from BDIMhandler's single H2D pack) is staged
-    into persistent buffers with async ``copy_`` — no host sync.  The live
-    fluid-field pointers (u, v, [w,] p) are outside our control (fluid_step
-    reallocates), so graphs are keyed on the pointer signature and captured
-    on a signature's 2nd sighting, up to ``_MAX_GRAPHS`` distinct signatures;
-    a churning signature stays on the eager launch (correct, just not
-    accelerated — warned once via ``warnings``).  ``replays``/``captures``/
-    ``eager_calls`` count what actually happened so callers/benchmarks can
-    verify the fast path engaged.
-
-    ``nu_rho_field`` (constant or variable viscosity) is staged into a
-    persistent buffer in ``_stage()`` so the graph always sees a stable
-    pointer — this enables graph capture for Smagorinsky / Carreau runs
-    where a fresh field would otherwise be allocated each step.
-    """
-
-    _MAX_GRAPHS = 8
-
-    def __init__(self, ndim: int):
-        self.D = int(ndim)
-        self._B = 0
-        self._max_vol = 0          # grow-only launch-dim watermark
-        self._kin_st = None        # persistent per-step staging buffers
-        self._lo_st = None
-        self._dim_st = None
-        self._nu_rho_staging = None  # persistent nu_rho staging (var. viscosity)
-        self._graphs = {}          # pointer signature -> torch.cuda.CUDAGraph
-        self._seen = {}            # pointer signature -> sighting count
-        self.replays = 0
-        self.captures = 0
-        self.eager_calls = 0
-
-    def _stage(self, kin, aabb_lo, aabb_dim, max_vol, nu_rho_field=None):
-        """Copy the per-step pose tensors into persistent staging buffers
-        (async device copies) and maintain the grow-only watermark.
-
-        When ``nu_rho_field`` is provided (variable viscosity), it is staged
-        into a persistent buffer so the pointer seen by the graph is stable
-        across steps — avoiding the signature churn that would otherwise
-        prevent graph replay.
-        """
-        B = int(aabb_dim.shape[0])
-        if (self._kin_st is None or B != self._B
-                or self._kin_st.shape != kin.shape
-                or self._kin_st.dtype != kin.dtype
-                or self._kin_st.device != kin.device):
-            self._kin_st = torch.empty_like(kin.contiguous())
-            self._lo_st = torch.empty_like(aabb_lo.contiguous())
-            self._dim_st = torch.empty_like(aabb_dim.contiguous())
-            self._B = B
-            self._graphs.clear()
-            self._seen.clear()
-        if int(max_vol) > self._max_vol:
-            # Launch dims are frozen at capture: growth invalidates.
-            self._max_vol = int(max_vol)
-            self._graphs.clear()
-        self._kin_st.copy_(kin)
-        self._lo_st.copy_(aabb_lo)
-        self._dim_st.copy_(aabb_dim)
-
-        # Stage nu_rho into a persistent buffer so its pointer is stable
-        # across steps (critical for graph capture when variable viscosity
-        # allocates a fresh nu_rho field each step).
-        if nu_rho_field is not None:
-            if (self._nu_rho_staging is None
-                    or self._nu_rho_staging.shape != nu_rho_field.shape
-                    or self._nu_rho_staging.dtype != nu_rho_field.dtype
-                    or self._nu_rho_staging.device != nu_rho_field.device):
-                self._nu_rho_staging = torch.empty_like(
-                    nu_rho_field.contiguous())
-                self._graphs.clear()
-                self._seen.clear()
-            self._nu_rho_staging.copy_(nu_rho_field)
-
-    @staticmethod
-    def _graph_safe(tensors):
-        """All live tensors must be CUDA, contiguous and dtype-stable so the
-        zero-copy ``_fast_flat`` wrap inside the capture pins the real
-        storage (a cast/contiguous fallback would capture a dangling temp)."""
-        return all(t.is_cuda and t.is_contiguous() for t in tensors)
-
-    def run(self, F_flat, F_offsets, body_shapes, body_meta,
-            kin, aabb_lo, aabb_dim, grids,
-            h_grid, max_vol, sdf_cc, interp_method,
-            fields, p, nu_rho_field,
-            eps_body, off_pres, off_visc, cell_vol, delta_order, out,
-            force_submethod=0, ph_tau=0.0):
-        """Zero ``out`` and run the native streaming force readout eagerly.
-        ``grids`` is (gx, gy[, gz]); ``fields`` is (u, v[, w]).  Both submethods
-        (0 = union ndelta, 2 = per-body normal) are one fanned union-band launch.
-
-        Per-step pose data is staged into persistent buffers (grow-only
-        ``max_vol`` watermark, pointer-stable ``nu_rho``) so the whole-step
-        native CUDA-graph runner can replay this region unchanged.
-        """
-        self._stage(kin, aabb_lo, aabb_dim, max_vol, nu_rho_field)
-
-        post = (streaming_sdf_forces_post_2d if self.D == 2
-                else streaming_sdf_forces_post_3d)
-        _nu_rho_use = self._nu_rho_staging
-
-        out.zero_()
-        post(F_flat, F_offsets, body_shapes, body_meta,
-             self._kin_st, self._lo_st, self._dim_st, *grids,
-             h_grid, self._max_vol, sdf_cc, interp_method,
-             *fields, p, _nu_rho_use,
-             eps_body, off_pres, off_visc, cell_vol, delta_order, out,
-             int(force_submethod), float(ph_tau))
-        self.eager_calls += 1
