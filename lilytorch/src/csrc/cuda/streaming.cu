@@ -28,122 +28,11 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
+#include "../common/interp.h"
 
 namespace lilytorch_kernels {
 
-// ---- 2-D samplers (formerly duplicated from streaming_sdf_direct.cu,
-//     which was deleted in CL2) ---------------------------------------------
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t bilinear_sample_uniform_2d(
-    const scalar_t* __restrict__ F, int Mx, int My,
-    scalar_t bx0, scalar_t by0, scalar_t inv_dx, scalar_t inv_dy,
-    scalar_t xq, scalar_t yq)
-{
-    scalar_t tx=(xq-bx0)*inv_dx, ty=(yq-by0)*inv_dy;
-    scalar_t Mx_lim=(scalar_t)(Mx-1), My_lim=(scalar_t)(My-1);
-    tx=max((scalar_t)0,min(tx,Mx_lim)); ty=max((scalar_t)0,min(ty,My_lim));
-    int ix=(int)tx; if(ix>Mx-2)ix=Mx-2;
-    int iy=(int)ty; if(iy>My-2)iy=My-2;
-    scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy;
-    scalar_t wx0=(scalar_t)1-fx, wx1=fx, wy0=(scalar_t)1-fy, wy1=fy;
-    int s1=My, base=ix*s1+iy;
-    return wx0*(wy0*F[base]+wy1*F[base+1])+wx1*(wy0*F[base+s1]+wy1*F[base+s1+1]);
-}
 
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t biquadratic_sample_uniform_2d(
-    const scalar_t* __restrict__ F, int Mx, int My,
-    scalar_t bx0, scalar_t by0, scalar_t inv_dx, scalar_t inv_dy,
-    scalar_t xq, scalar_t yq)
-{
-    scalar_t tx=(xq-bx0)*inv_dx, ty=(yq-by0)*inv_dy;
-    scalar_t Mx_lim=(scalar_t)(Mx-1), My_lim=(scalar_t)(My-1);
-    tx=max((scalar_t)0,min(tx,Mx_lim)); ty=max((scalar_t)0,min(ty,My_lim));
-    int ix=(int)tx; if(ix>Mx-2)ix=Mx-2;
-    int iy=(int)ty; if(iy>My-2)iy=My-2;
-    if(ix<1||iy<1||Mx<3||My<3) return bilinear_sample_uniform_2d<scalar_t>(F,Mx,My,bx0,by0,inv_dx,inv_dy,xq,yq);
-    scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy, half=(scalar_t)0.5;
-    scalar_t wxm=half*fx*(fx-(scalar_t)1), wx0=(scalar_t)1-fx*fx, wxp=half*fx*(fx+(scalar_t)1);
-    scalar_t wym=half*fy*(fy-(scalar_t)1), wy0=(scalar_t)1-fy*fy, wyp=half*fy*(fy+(scalar_t)1);
-    int s1=My, base=(ix-1)*s1+(iy-1);
-    scalar_t out=(scalar_t)0;
-    for(int dx=0;dx<3;++dx){
-        scalar_t wx=(dx==0)?wxm:(dx==1?wx0:wxp);
-        int b0=base+dx*s1;
-        out+=wx*(wym*F[b0]+wy0*F[b0+1]+wyp*F[b0+2]);
-    }
-    return out;
-}
-
-// ---- 3-D samplers ----------------------------------------------------------
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t trilinear_sample_uniform(
-    const scalar_t* __restrict__ F, int Mx, int My, int Mz,
-    scalar_t bx0, scalar_t by0, scalar_t bz0,
-    scalar_t inv_dx, scalar_t inv_dy, scalar_t inv_dz,
-    scalar_t xq, scalar_t yq, scalar_t zq)
-{
-    scalar_t tx=(xq-bx0)*inv_dx, ty=(yq-by0)*inv_dy, tz=(zq-bz0)*inv_dz;
-    scalar_t Mx_lim=(scalar_t)(Mx-1), My_lim=(scalar_t)(My-1), Mz_lim=(scalar_t)(Mz-1);
-    tx=max((scalar_t)0,min(tx,Mx_lim)); ty=max((scalar_t)0,min(ty,My_lim)); tz=max((scalar_t)0,min(tz,Mz_lim));
-    int ix=(int)tx; if(ix>Mx-2)ix=Mx-2;
-    int iy=(int)ty; if(iy>My-2)iy=My-2;
-    int iz=(int)tz; if(iz>Mz-2)iz=Mz-2;
-    scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy, fz=tz-(scalar_t)iz;
-    scalar_t wx0=(scalar_t)1-fx, wx1=fx, wy0=(scalar_t)1-fy, wy1=fy, wz0=(scalar_t)1-fz, wz1=fz;
-    int s2=Mz, s1=My*Mz, base=ix*s1+iy*s2+iz;
-    return wx0*(wy0*(wz0*F[base]+wz1*F[base+1])+wy1*(wz0*F[base+s2]+wz1*F[base+s2+1]))
-         + wx1*(wy0*(wz0*F[base+s1]+wz1*F[base+s1+1])+wy1*(wz0*F[base+s1+s2]+wz1*F[base+s1+s2+1]));
-}
-
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t triquadratic_sample_uniform(
-    const scalar_t* __restrict__ F, int Mx, int My, int Mz,
-    scalar_t bx0, scalar_t by0, scalar_t bz0,
-    scalar_t inv_dx, scalar_t inv_dy, scalar_t inv_dz,
-    scalar_t xq, scalar_t yq, scalar_t zq)
-{
-    scalar_t tx=(xq-bx0)*inv_dx, ty=(yq-by0)*inv_dy, tz=(zq-bz0)*inv_dz;
-    scalar_t Mx_lim=(scalar_t)(Mx-1), My_lim=(scalar_t)(My-1), Mz_lim=(scalar_t)(Mz-1);
-    tx=max((scalar_t)0,min(tx,Mx_lim)); ty=max((scalar_t)0,min(ty,My_lim)); tz=max((scalar_t)0,min(tz,Mz_lim));
-    int ix=(int)tx; if(ix>Mx-2)ix=Mx-2;
-    int iy=(int)ty; if(iy>My-2)iy=My-2;
-    int iz=(int)tz; if(iz>Mz-2)iz=Mz-2;
-    if(ix<1||iy<1||iz<1||Mx<3||My<3||Mz<3)
-        return trilinear_sample_uniform<scalar_t>(F,Mx,My,Mz,bx0,by0,bz0,inv_dx,inv_dy,inv_dz,xq,yq,zq);
-    scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy, fz=tz-(scalar_t)iz, half=(scalar_t)0.5;
-    scalar_t wxm=half*fx*(fx-(scalar_t)1), wx0=(scalar_t)1-fx*fx, wxp=half*fx*(fx+(scalar_t)1);
-    scalar_t wym=half*fy*(fy-(scalar_t)1), wy0=(scalar_t)1-fy*fy, wyp=half*fy*(fy+(scalar_t)1);
-    scalar_t wzm=half*fz*(fz-(scalar_t)1), wz0=(scalar_t)1-fz*fz, wzp=half*fz*(fz+(scalar_t)1);
-    int s2=Mz, s1=My*Mz, base=(ix-1)*s1+(iy-1)*s2+(iz-1);
-    scalar_t out=(scalar_t)0;
-    for(int dx=0;dx<3;++dx){
-        scalar_t wx=(dx==0)?wxm:(dx==1?wx0:wxp); int b0=base+dx*s1; scalar_t plane=(scalar_t)0;
-        for(int dy=0;dy<3;++dy){
-            scalar_t wy=(dy==0)?wym:(dy==1?wy0:wyp); int b1=b0+dy*s2;
-            plane+=wy*(wzm*F[b1]+wz0*F[b1+1]+wzp*F[b1+2]);
-        }
-        out+=wx*plane;
-    }
-    return out;
-}
-
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t sdf_sample_2d(int interp, const scalar_t* F, int Mx, int My,
-    scalar_t bx0, scalar_t by0, scalar_t idx_, scalar_t idy_, scalar_t xq, scalar_t yq) {
-    return interp==1 ? biquadratic_sample_uniform_2d<scalar_t>(F,Mx,My,bx0,by0,idx_,idy_,xq,yq)
-                     : bilinear_sample_uniform_2d<scalar_t>(F,Mx,My,bx0,by0,idx_,idy_,xq,yq);
-}
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t sdf_sample_3d(int interp, const scalar_t* F, int Mx, int My, int Mz,
-    scalar_t bx0, scalar_t by0, scalar_t bz0, scalar_t idx_, scalar_t idy_, scalar_t idz_,
-    scalar_t xq, scalar_t yq, scalar_t zq) {
-    return interp==1 ? triquadratic_sample_uniform<scalar_t>(F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,xq,yq,zq)
-                     : trilinear_sample_uniform<scalar_t>(F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,xq,yq,zq);
-}
-
-
-// =====================================================================
 //  2-D min kernel — fanned per-body, writes raw SDF + vel to private bufs
 // =====================================================================
 template <typename scalar_t>
@@ -190,10 +79,10 @@ __global__ void regime_b_min_kernel_2d(
         scalar_t byq = r10 * dxw + r11 * dyw;
 
         int64_t idx = off + local;
-        priv_sdf_cc[idx] = sdf_sample_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
-        priv_sdf_u[idx]  = sdf_sample_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq + du_x, byq + du_y);
+        priv_sdf_cc[idx] = sdf_sample_dispatch_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
+        priv_sdf_u[idx]  = sdf_sample_dispatch_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq + du_x, byq + du_y);
         priv_body_u[idx] = lv_x - om * (yc - cm_y);
-        priv_sdf_v[idx]  = sdf_sample_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq + dv_x, byq + dv_y);
+        priv_sdf_v[idx]  = sdf_sample_dispatch_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq + dv_x, byq + dv_y);
         priv_body_v[idx] = lv_y + om * (xc - cm_x);
     }
 }
@@ -327,12 +216,12 @@ __global__ void regime_b_min_kernel_3d(
         scalar_t bzq = r20*dxw + r21*dyw + r22*bzw;
 
         int64_t idx = off + local;
-        priv_sdf_cc[idx] = sdf_sample_3d<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq,byq,bzq);
-        priv_sdf_u[idx]  = sdf_sample_3d<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+du_x,byq+du_y,bzq+du_z);
+        priv_sdf_cc[idx] = sdf_sample_dispatch<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq,byq,bzq);
+        priv_sdf_u[idx]  = sdf_sample_dispatch<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+du_x,byq+du_y,bzq+du_z);
         priv_body_u[idx] = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
-        priv_sdf_v[idx]  = sdf_sample_3d<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+dv_x,byq+dv_y,bzq+dv_z);
+        priv_sdf_v[idx]  = sdf_sample_dispatch<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+dv_x,byq+dv_y,bzq+dv_z);
         priv_body_v[idx] = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
-        priv_sdf_w[idx]  = sdf_sample_3d<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+dw_x,byq+dw_y,bzq+dw_z);
+        priv_sdf_w[idx]  = sdf_sample_dispatch<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+dw_x,byq+dw_y,bzq+dw_z);
         priv_body_w[idx] = lv_z + av_x*(yc - cm_y) - av_y*(xc - cm_x);
     }
 }

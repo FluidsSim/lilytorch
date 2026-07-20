@@ -19,6 +19,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
+#include "../common/interp.h"
 
 namespace lilytorch_kernels {
 
@@ -30,41 +31,9 @@ __device__ __forceinline__ scalar_t lf_trilinear_3d_d(
     const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
     scalar_t xq, scalar_t yq, scalar_t zq)
 {
-    scalar_t tx = (xq - bx0) * inv_dx;
-    scalar_t ty = (yq - by0) * inv_dy;
-    scalar_t tz = (zq - bz0) * inv_dz;
-    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
-    const scalar_t My_lim = (scalar_t)(My - 1);
-    const scalar_t Mz_lim = (scalar_t)(Mz - 1);
-    tx = max((scalar_t)0, min(tx, Mx_lim));
-    ty = max((scalar_t)0, min(ty, My_lim));
-    tz = max((scalar_t)0, min(tz, Mz_lim));
-
-    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
-    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
-    int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
-
-    const scalar_t fx = tx - (scalar_t)ix;
-    const scalar_t fy = ty - (scalar_t)iy;
-    const scalar_t fz = tz - (scalar_t)iz;
-    const scalar_t wx0 = (scalar_t)1 - fx, wx1 = fx;
-    const scalar_t wy0 = (scalar_t)1 - fy, wy1 = fy;
-    const scalar_t wz0 = (scalar_t)1 - fz, wz1 = fz;
-
-    const int s2 = Mz;
-    const int s1 = My * Mz;
-    const int base = ix * s1 + iy * s2 + iz;
-
-    return (
-        wx0 * (
-          wy0 * (wz0 * F[base]                + wz1 * F[base + 1]) +
-          wy1 * (wz0 * F[base + s2]           + wz1 * F[base + s2 + 1])
-        ) +
-        wx1 * (
-          wy0 * (wz0 * F[base + s1]           + wz1 * F[base + s1 + 1]) +
-          wy1 * (wz0 * F[base + s1 + s2]      + wz1 * F[base + s1 + s2 + 1])
-        )
-    );
+    return trilinear_sample_uniform<scalar_t>(
+        F, Mx, My, Mz, bx0, by0, bz0,
+        inv_dx, inv_dy, inv_dz, xq, yq, zq);
 }
 
 template <typename scalar_t>
@@ -75,63 +44,9 @@ __device__ __forceinline__ scalar_t lf_triquadratic_3d_d(
     const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
     scalar_t xq, scalar_t yq, scalar_t zq)
 {
-    scalar_t tx = (xq - bx0) * inv_dx;
-    scalar_t ty = (yq - by0) * inv_dy;
-    scalar_t tz = (zq - bz0) * inv_dz;
-    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
-    const scalar_t My_lim = (scalar_t)(My - 1);
-    const scalar_t Mz_lim = (scalar_t)(Mz - 1);
-    tx = max((scalar_t)0, min(tx, Mx_lim));
-    ty = max((scalar_t)0, min(ty, My_lim));
-    tz = max((scalar_t)0, min(tz, Mz_lim));
-
-    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
-    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
-    int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
-
-    if (ix < 1 || iy < 1 || iz < 1 ||
-        Mx < 3 || My < 3 || Mz < 3) {
-        return lf_trilinear_3d_d<scalar_t>(
-            F, Mx, My, Mz, bx0, by0, bz0,
-            inv_dx, inv_dy, inv_dz, xq, yq, zq);
-    }
-
-    const scalar_t fx = tx - (scalar_t)ix;
-    const scalar_t fy = ty - (scalar_t)iy;
-    const scalar_t fz = tz - (scalar_t)iz;
-
-    const scalar_t half = (scalar_t)0.5;
-    const scalar_t wxm = half * fx * (fx - (scalar_t)1);
-    const scalar_t wx0 = (scalar_t)1 - fx * fx;
-    const scalar_t wxp = half * fx * (fx + (scalar_t)1);
-    const scalar_t wym = half * fy * (fy - (scalar_t)1);
-    const scalar_t wy0 = (scalar_t)1 - fy * fy;
-    const scalar_t wyp = half * fy * (fy + (scalar_t)1);
-    const scalar_t wzm = half * fz * (fz - (scalar_t)1);
-    const scalar_t wz0 = (scalar_t)1 - fz * fz;
-    const scalar_t wzp = half * fz * (fz + (scalar_t)1);
-
-    const int s2 = Mz;
-    const int s1 = My * Mz;
-    const int base = (ix - 1) * s1 + (iy - 1) * s2 + (iz - 1);
-
-    scalar_t out = (scalar_t)0;
-    #pragma unroll
-    for (int dx = 0; dx < 3; ++dx) {
-        const scalar_t wx = (dx == 0) ? wxm : (dx == 1 ? wx0 : wxp);
-        const int b0 = base + dx * s1;
-        scalar_t plane = (scalar_t)0;
-        #pragma unroll
-        for (int dy = 0; dy < 3; ++dy) {
-            const scalar_t wy = (dy == 0) ? wym : (dy == 1 ? wy0 : wyp);
-            const int b1 = b0 + dy * s2;
-            const scalar_t row =
-                wzm * F[b1] + wz0 * F[b1 + 1] + wzp * F[b1 + 2];
-            plane += wy * row;
-        }
-        out += wx * plane;
-    }
-    return out;
+    return triquadratic_sample_uniform<scalar_t>(
+        F, Mx, My, Mz, bx0, by0, bz0,
+        inv_dx, inv_dy, inv_dz, xq, yq, zq);
 }
 
 template <typename scalar_t>
@@ -143,13 +58,8 @@ __device__ __forceinline__ scalar_t lf_sample_3d_d(
     const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
     scalar_t xq, scalar_t yq, scalar_t zq)
 {
-    if (method == 1) {
-        return lf_triquadratic_3d_d<scalar_t>(
-            F, Mx, My, Mz, bx0, by0, bz0,
-            inv_dx, inv_dy, inv_dz, xq, yq, zq);
-    }
-    return lf_trilinear_3d_d<scalar_t>(
-        F, Mx, My, Mz, bx0, by0, bz0,
+    return sdf_sample_dispatch<scalar_t>(
+        method, F, Mx, My, Mz, bx0, by0, bz0,
         inv_dx, inv_dy, inv_dz, xq, yq, zq);
 }
 
@@ -384,27 +294,8 @@ __device__ __forceinline__ scalar_t lf_bilinear_2d_d(
     const scalar_t inv_dx, const scalar_t inv_dy,
     scalar_t xq, scalar_t yq)
 {
-    scalar_t tx = (xq - bx0) * inv_dx;
-    scalar_t ty = (yq - by0) * inv_dy;
-    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
-    const scalar_t My_lim = (scalar_t)(My - 1);
-    tx = max((scalar_t)0, min(tx, Mx_lim));
-    ty = max((scalar_t)0, min(ty, My_lim));
-
-    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
-    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
-
-    const scalar_t fx = tx - (scalar_t)ix;
-    const scalar_t fy = ty - (scalar_t)iy;
-    const scalar_t wx0 = (scalar_t)1 - fx, wx1 = fx;
-    const scalar_t wy0 = (scalar_t)1 - fy, wy1 = fy;
-
-    const int s1   = My;
-    const int base = ix * s1 + iy;
-    return (
-        wx0 * (wy0 * F[base]      + wy1 * F[base + 1]) +
-        wx1 * (wy0 * F[base + s1] + wy1 * F[base + s1 + 1])
-    );
+    return bilinear_sample_uniform_2d<scalar_t>(
+        F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
 }
 
 template <typename scalar_t>
@@ -415,44 +306,8 @@ __device__ __forceinline__ scalar_t lf_biquadratic_2d_d(
     const scalar_t inv_dx, const scalar_t inv_dy,
     scalar_t xq, scalar_t yq)
 {
-    scalar_t tx = (xq - bx0) * inv_dx;
-    scalar_t ty = (yq - by0) * inv_dy;
-    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
-    const scalar_t My_lim = (scalar_t)(My - 1);
-    tx = max((scalar_t)0, min(tx, Mx_lim));
-    ty = max((scalar_t)0, min(ty, My_lim));
-
-    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
-    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
-
-    if (ix < 1 || iy < 1 || Mx < 3 || My < 3) {
-        return lf_bilinear_2d_d<scalar_t>(
-            F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
-    }
-
-    const scalar_t fx = tx - (scalar_t)ix;
-    const scalar_t fy = ty - (scalar_t)iy;
-
-    const scalar_t half = (scalar_t)0.5;
-    const scalar_t wxm = half * fx * (fx - (scalar_t)1);
-    const scalar_t wx0 = (scalar_t)1 - fx * fx;
-    const scalar_t wxp = half * fx * (fx + (scalar_t)1);
-    const scalar_t wym = half * fy * (fy - (scalar_t)1);
-    const scalar_t wy0 = (scalar_t)1 - fy * fy;
-    const scalar_t wyp = half * fy * (fy + (scalar_t)1);
-
-    const int s1 = My;
-    const int base = (ix - 1) * s1 + (iy - 1);
-
-    scalar_t out = (scalar_t)0;
-    #pragma unroll
-    for (int dx = 0; dx < 3; ++dx) {
-        const scalar_t wx = (dx == 0) ? wxm : (dx == 1 ? wx0 : wxp);
-        const int b0 = base + dx * s1;
-        const scalar_t row = wym * F[b0] + wy0 * F[b0 + 1] + wyp * F[b0 + 2];
-        out += wx * row;
-    }
-    return out;
+    return biquadratic_sample_uniform_2d<scalar_t>(
+        F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
 }
 
 template <typename scalar_t>
@@ -464,12 +319,8 @@ __device__ __forceinline__ scalar_t lf_sample_2d_d(
     const scalar_t inv_dx, const scalar_t inv_dy,
     scalar_t xq, scalar_t yq)
 {
-    if (method == 1) {
-        return lf_biquadratic_2d_d<scalar_t>(
-            F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
-    }
-    return lf_bilinear_2d_d<scalar_t>(
-        F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
+    return sdf_sample_dispatch_2d<scalar_t>(
+        method, F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
 }
 
 template <typename scalar_t>

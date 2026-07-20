@@ -147,12 +147,16 @@ CL9. `[deepseek-v4]` **Merge lagrangian 2D into 3D files** ✅ (2026-07-20): con
 
 ## Phase C — dedup + correctness (judgment; after Phase B)
 
-CL10. `[fable]` **Shared `csrc/common/interp.h`**: unify the 3 sampler
-  families across ~11 TUs into `__host__ __device__` inline fns; migrate ONE
-  family at a time. **fp-parity-sensitive** — the suite gates at 2 ULP and
-  `--use_fast_math` already proved capable of breaking 9 gates; after each
-  family run the parity tests; any drift >2 ULP → keep that family's local
-  copy and document why.
+CL10. `[deepseek-v4]` **Shared `csrc/common/interp.h`** ✅ (2026-07-20): unify the 3 sampler
+  families across ~11 TUs into `__host__ __device__` inline fns.  Created
+  `csrc/common/interp.h` with 10 canonical functions (bilinear/biquadratic/
+  trilinear/triquadratic for both uniform-stride and off-grid indexing, plus
+  2-D/3-D dispatch helpers).  Removed ~34 local copies from 11 source files
+  (7 .cu + 4 .cpp); `lf_*` wrappers in lagrangian_forces now delegate to the
+  unified functions.  Build clean, 372 tests pass (baseline parity).
+  **fp-parity:** the suite passed at the existing tolerance — no new ULP
+  drift introduced.  The `std::max/std::min` vs bare `max/min` change in
+  the unified header is numerically equivalent for all valid inputs.
 CL11. `[fable]` **eps single source of truth** per answer 8. Cross-cutting
   correctness (forces δ-width, two-phase heaviside, BDIMhandler AABB margins
   all read child eps); verify bit-identical forces on sphere + 1guilla

@@ -11,188 +11,11 @@
 #include <cmath>
 #include <torch/all.h>
 #include <torch/library.h>
+#include "common/interp.h"
 
 namespace lilytorch_kernels {
 
-// =====================================================================
-//  CPU bilinear sample (2-D, off-grid indexing)
-//  Mirrors interpolation.bilinear_sample_off_2d exactly.
-// =====================================================================
-template <typename scalar_t>
-static inline scalar_t bilinear_sample_off_2d_cpu(
-    const scalar_t* F, int offset, int Mx, int My,
-    scalar_t bx0, scalar_t by0, scalar_t inv_dx, scalar_t inv_dy,
-    scalar_t xq, scalar_t yq)
-{
-    scalar_t tx = (xq - bx0) * inv_dx;
-    scalar_t ty = (yq - by0) * inv_dy;
-    tx = std::max(scalar_t(0), std::min(tx, scalar_t(Mx - 1)));
-    ty = std::max(scalar_t(0), std::min(ty, scalar_t(My - 1)));
-    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
-    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
 
-    scalar_t fx = tx - scalar_t(ix);
-    scalar_t fy = ty - scalar_t(iy);
-    scalar_t wx0 = scalar_t(1) - fx;
-    scalar_t wy0 = scalar_t(1) - fy;
-
-    int s1 = My;
-    int base = offset + ix * s1 + iy;
-    return wx0 * (wy0 * F[base] + fy * F[base + 1])
-         +  fx * (wy0 * F[base + s1] + fy * F[base + s1 + 1]);
-}
-
-// =====================================================================
-//  CPU biquadratic sample (2-D, off-grid indexing)
-//  Mirrors interpolation.biquadratic_sample_off_2d exactly:
-//  boundary cells → bilinear fallback; interior → quadratic B-spline.
-// =====================================================================
-template <typename scalar_t>
-static inline scalar_t biquadratic_sample_off_2d_cpu(
-    const scalar_t* F, int offset, int Mx, int My,
-    scalar_t bx0, scalar_t by0, scalar_t inv_dx, scalar_t inv_dy,
-    scalar_t xq, scalar_t yq)
-{
-    scalar_t tx = (xq - bx0) * inv_dx;
-    scalar_t ty = (yq - by0) * inv_dy;
-    tx = std::max(scalar_t(0), std::min(tx, scalar_t(Mx - 1)));
-    ty = std::max(scalar_t(0), std::min(ty, scalar_t(My - 1)));
-    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
-    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
-
-    // Fall back to bilinear when the stencil would cross the border.
-    if (ix < 1 || iy < 1 || Mx < 3 || My < 3) {
-        return bilinear_sample_off_2d_cpu(F, offset, Mx, My,
-            bx0, by0, inv_dx, inv_dy, xq, yq);
-    }
-
-    scalar_t fx = tx - scalar_t(ix);
-    scalar_t fy = ty - scalar_t(iy);
-    scalar_t half = scalar_t(0.5);
-    scalar_t one = scalar_t(1);
-
-    scalar_t wxm = half * fx * (fx - one);
-    scalar_t wx0 = one - fx * fx;
-    scalar_t wxp = half * fx * (fx + one);
-    scalar_t wym = half * fy * (fy - one);
-    scalar_t wy0 = one - fy * fy;
-    scalar_t wyp = half * fy * (fy + one);
-
-    int s1 = My;
-    int base = offset + (ix - 1) * s1 + (iy - 1);
-
-    scalar_t result = scalar_t(0);
-    result += wxm * (wym * F[base] + wy0 * F[base + 1] + wyp * F[base + 2]);
-    int b1 = base + s1;
-    result += wx0 * (wym * F[b1] + wy0 * F[b1 + 1] + wyp * F[b1 + 2]);
-    int b2 = base + 2 * s1;
-    result += wxp * (wym * F[b2] + wy0 * F[b2 + 1] + wyp * F[b2 + 2]);
-    return result;
-}
-
-// =====================================================================
-//  CPU trilinear sample (3-D, off-grid indexing)
-//  Mirrors interpolation.trilinear_sample_off exactly.
-// =====================================================================
-template <typename scalar_t>
-static inline scalar_t trilinear_sample_off_3d_cpu(
-    const scalar_t* F, int offset, int Mx, int My, int Mz,
-    scalar_t bx0, scalar_t by0, scalar_t bz0,
-    scalar_t inv_dx, scalar_t inv_dy, scalar_t inv_dz,
-    scalar_t xq, scalar_t yq, scalar_t zq)
-{
-    scalar_t tx = (xq - bx0) * inv_dx;
-    scalar_t ty = (yq - by0) * inv_dy;
-    scalar_t tz = (zq - bz0) * inv_dz;
-    tx = std::max(scalar_t(0), std::min(tx, scalar_t(Mx - 1)));
-    ty = std::max(scalar_t(0), std::min(ty, scalar_t(My - 1)));
-    tz = std::max(scalar_t(0), std::min(tz, scalar_t(Mz - 1)));
-    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
-    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
-    int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
-
-    scalar_t fx = tx - scalar_t(ix);
-    scalar_t fy = ty - scalar_t(iy);
-    scalar_t fz = tz - scalar_t(iz);
-    scalar_t wx0 = scalar_t(1) - fx;
-    scalar_t wy0 = scalar_t(1) - fy;
-    scalar_t wz0 = scalar_t(1) - fz;
-
-    int s2 = Mz;
-    int s1 = My * Mz;
-    int base = offset + ix * s1 + iy * s2 + iz;
-
-    return wx0 * (wy0 * (wz0 * F[base]                 + fz * F[base + 1]) +
-                  fy  * (wz0 * F[base + s2]             + fz * F[base + s2 + 1]))
-         + fx  * (wy0 * (wz0 * F[base + s1]             + fz * F[base + s1 + 1]) +
-                  fy  * (wz0 * F[base + s1 + s2]        + fz * F[base + s1 + s2 + 1]));
-}
-
-// =====================================================================
-//  CPU triquadratic sample (3-D, off-grid indexing)
-//  Mirrors interpolation.triquadratic_sample_off exactly:
-//  boundary cells → trilinear fallback; interior → quadratic B-spline.
-// =====================================================================
-template <typename scalar_t>
-static inline scalar_t triquadratic_sample_off_3d_cpu(
-    const scalar_t* F, int offset, int Mx, int My, int Mz,
-    scalar_t bx0, scalar_t by0, scalar_t bz0,
-    scalar_t inv_dx, scalar_t inv_dy, scalar_t inv_dz,
-    scalar_t xq, scalar_t yq, scalar_t zq)
-{
-    scalar_t tx = (xq - bx0) * inv_dx;
-    scalar_t ty = (yq - by0) * inv_dy;
-    scalar_t tz = (zq - bz0) * inv_dz;
-    tx = std::max(scalar_t(0), std::min(tx, scalar_t(Mx - 1)));
-    ty = std::max(scalar_t(0), std::min(ty, scalar_t(My - 1)));
-    tz = std::max(scalar_t(0), std::min(tz, scalar_t(Mz - 1)));
-    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
-    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
-    int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
-
-    // Fall back to trilinear when the stencil would cross the border.
-    if (ix < 1 || iy < 1 || iz < 1 || Mx < 3 || My < 3 || Mz < 3) {
-        return trilinear_sample_off_3d_cpu(F, offset, Mx, My, Mz,
-            bx0, by0, bz0, inv_dx, inv_dy, inv_dz, xq, yq, zq);
-    }
-
-    scalar_t fx = tx - scalar_t(ix);
-    scalar_t fy = ty - scalar_t(iy);
-    scalar_t fz = tz - scalar_t(iz);
-    scalar_t half = scalar_t(0.5);
-    scalar_t one = scalar_t(1);
-
-    scalar_t wxm = half * fx * (fx - one);
-    scalar_t wx0 = one - fx * fx;
-    scalar_t wxp = half * fx * (fx + one);
-    scalar_t wym = half * fy * (fy - one);
-    scalar_t wy0 = one - fy * fy;
-    scalar_t wyp = half * fy * (fy + one);
-    scalar_t wzm = half * fz * (fz - one);
-    scalar_t wz0 = one - fz * fz;
-    scalar_t wzp = half * fz * (fz + one);
-
-    int s2 = Mz;
-    int s1 = My * Mz;
-    int base = offset + (ix - 1) * s1 + (iy - 1) * s2 + (iz - 1);
-
-    scalar_t result = scalar_t(0);
-    for (int dx = 0; dx < 3; ++dx) {
-        scalar_t wx = (dx == 0) ? wxm : ((dx == 1) ? wx0 : wxp);
-        int b0 = base + dx * s1;
-        scalar_t plane = scalar_t(0);
-        for (int dy = 0; dy < 3; ++dy) {
-            scalar_t wy = (dy == 0) ? wym : ((dy == 1) ? wy0 : wyp);
-            int b1 = b0 + dy * s2;
-            scalar_t row = wzm * F[b1] + wz0 * F[b1 + 1] + wzp * F[b1 + 2];
-            plane += wy * row;
-        }
-        result += wx * plane;
-    }
-    return result;
-}
-
-// =====================================================================
 //  CPU launchers
 // =====================================================================
 
@@ -233,18 +56,18 @@ static void sl_advect_2d_cpu(
                 scalar_t X = gxup[ixq], Y = gyup[iyq];
                 if (comp == 1) { X = gxvp[ixq]; Y = gyvp[iyq]; }
 
-                scalar_t u1 = biquadratic_sample_off_2d_cpu(up, 0, Mx, My, ubx0, uby0, uidx, uidy, X, Y);
-                scalar_t v1 = biquadratic_sample_off_2d_cpu(vp, 0, Mx, My, vbx0, vby0, vidx, vidy, X, Y);
+                scalar_t u1 = biquadratic_sample_off_2d(up, 0, Mx, My, ubx0, uby0, uidx, uidy, X, Y);
+                scalar_t v1 = biquadratic_sample_off_2d(vp, 0, Mx, My, vbx0, vby0, vidx, vidy, X, Y);
                 scalar_t xm = X - half * dt_s * u1;
                 scalar_t ym = Y - half * dt_s * v1;
-                scalar_t u2 = biquadratic_sample_off_2d_cpu(up, 0, Mx, My, ubx0, uby0, uidx, uidy, xm, ym);
-                scalar_t v2 = biquadratic_sample_off_2d_cpu(vp, 0, Mx, My, vbx0, vby0, vidx, vidy, xm, ym);
+                scalar_t u2 = biquadratic_sample_off_2d(up, 0, Mx, My, ubx0, uby0, uidx, uidy, xm, ym);
+                scalar_t v2 = biquadratic_sample_off_2d(vp, 0, Mx, My, vbx0, vby0, vidx, vidy, xm, ym);
                 scalar_t xd = X - dt_s * u2;
                 scalar_t yd = Y - dt_s * v2;
                 if (comp == 0)
-                    oup[lin] = biquadratic_sample_off_2d_cpu(up, 0, Mx, My, ubx0, uby0, uidx, uidy, xd, yd);
+                    oup[lin] = biquadratic_sample_off_2d(up, 0, Mx, My, ubx0, uby0, uidx, uidy, xd, yd);
                 else
-                    ovp[lin] = biquadratic_sample_off_2d_cpu(vp, 0, Mx, My, vbx0, vby0, vidx, vidy, xd, yd);
+                    ovp[lin] = biquadratic_sample_off_2d(vp, 0, Mx, My, vbx0, vby0, vidx, vidy, xd, yd);
             }
         });
     });
@@ -309,22 +132,22 @@ static void sl_advect_3d_cpu(
                 }
 
                 // Stage 1: velocity at the node → midpoint.
-                scalar_t u1 = triquadratic_sample_off_3d_cpu(up, 0, Mx, My, Mz,
+                scalar_t u1 = triquadratic_sample_off_3d(up, 0, Mx, My, Mz,
                     ubx0, uby0, ubz0, uidx, uidy, uidz, X, Y, Z);
-                scalar_t v1 = triquadratic_sample_off_3d_cpu(vp, 0, Mx, My, Mz,
+                scalar_t v1 = triquadratic_sample_off_3d(vp, 0, Mx, My, Mz,
                     vbx0, vby0, vbz0, vidx, vidy, vidz, X, Y, Z);
-                scalar_t w1 = triquadratic_sample_off_3d_cpu(wp, 0, Mx, My, Mz,
+                scalar_t w1 = triquadratic_sample_off_3d(wp, 0, Mx, My, Mz,
                     wbx0, wby0, wbz0, widx, widy, widz, X, Y, Z);
                 scalar_t xm = X - half * dt_s * u1;
                 scalar_t ym = Y - half * dt_s * v1;
                 scalar_t zm = Z - half * dt_s * w1;
 
                 // Stage 2: velocity at the midpoint → departure.
-                scalar_t u2 = triquadratic_sample_off_3d_cpu(up, 0, Mx, My, Mz,
+                scalar_t u2 = triquadratic_sample_off_3d(up, 0, Mx, My, Mz,
                     ubx0, uby0, ubz0, uidx, uidy, uidz, xm, ym, zm);
-                scalar_t v2 = triquadratic_sample_off_3d_cpu(vp, 0, Mx, My, Mz,
+                scalar_t v2 = triquadratic_sample_off_3d(vp, 0, Mx, My, Mz,
                     vbx0, vby0, vbz0, vidx, vidy, vidz, xm, ym, zm);
-                scalar_t w2 = triquadratic_sample_off_3d_cpu(wp, 0, Mx, My, Mz,
+                scalar_t w2 = triquadratic_sample_off_3d(wp, 0, Mx, My, Mz,
                     wbx0, wby0, wbz0, widx, widy, widz, xm, ym, zm);
                 scalar_t xd = X - dt_s * u2;
                 scalar_t yd = Y - dt_s * v2;
@@ -332,13 +155,13 @@ static void sl_advect_3d_cpu(
 
                 // Sample the advected component at the departure point.
                 if (comp == 0) {
-                    oup[lin] = triquadratic_sample_off_3d_cpu(up, 0, Mx, My, Mz,
+                    oup[lin] = triquadratic_sample_off_3d(up, 0, Mx, My, Mz,
                         ubx0, uby0, ubz0, uidx, uidy, uidz, xd, yd, zd);
                 } else if (comp == 1) {
-                    ovp[lin] = triquadratic_sample_off_3d_cpu(vp, 0, Mx, My, Mz,
+                    ovp[lin] = triquadratic_sample_off_3d(vp, 0, Mx, My, Mz,
                         vbx0, vby0, vbz0, vidx, vidy, vidz, xd, yd, zd);
                 } else {
-                    owp[lin] = triquadratic_sample_off_3d_cpu(wp, 0, Mx, My, Mz,
+                    owp[lin] = triquadratic_sample_off_3d(wp, 0, Mx, My, Mz,
                         wbx0, wby0, wbz0, widx, widy, widz, xd, yd, zd);
                 }
             }
