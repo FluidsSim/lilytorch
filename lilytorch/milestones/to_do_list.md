@@ -140,7 +140,7 @@ CL8. `[deepseek-v4]` **`csrc/common/`**: move advection_schemes.h, bc_ops.h,
   strain_rate.h, poisson_gauge.h (+ poisson_scratch.h for tidiness); update
   includes (.cpp → `"common/x.h"`, .cu → `"../common/x.h"`). No setup.py
   change (it globs .cpp/.cu only).
-CL9. `[deepseek-v4]` **Merge lagrangian 2D into 3D files**: concatenate
+CL9. `[deepseek-v4]` **Merge lagrangian 2D into 3D files** ✅ (2026-07-20): concatenate
   cuda/lagrangian_forces_2d.cu → cuda/lagrangian_forces.cu and
   lagrangian_forces_cpu_2d.cpp → lagrangian_forces_cpu.cpp. Keep BOTH op
   registrations; rename colliding statics. Pure file merge, no templating.
@@ -160,20 +160,10 @@ CL11. `[fable]` **eps single source of truth** per answer 8. Cross-cutting
 
 ## Phase D — research / independent
 
-CL12. `[fable]` **Force-noise reduction study** per answer 10: benchmark noise
-  spectrum vs {eps_cells 2h/3h/4h} × {sin vs Hermite BDIM kernel} ×
-  {force_relaxation 0/0.3/0.5} × {eulerian vs lagrangian force_method} on the
-  sphere validation case; promote winners to defaults. Implements LP3 + LT4
-  along the way.
 CL13. `[deepseek-v4]` **TI1 promotion — pytest bootstrap**: conftest.py +
   pytest.ini collecting lilytorch/tests/, GPU tests auto-skip without CUDA,
   optional GH Actions CPU-parity workflow. Enabler for all phases; can run
   first.
-CL14. `[deepseek-v4]` **Reconcile pleurodeles full-3D stub (LP11)**: the "not
-  available yet" SDF `pleurosim_v0.3.sdf` now EXISTS in
-  examples/sdfs/pleurodeles/ — wire it into gen_configs_swim_full3d.py and
-  smoke-run, or mark the example experimental.
-
 
 
 
