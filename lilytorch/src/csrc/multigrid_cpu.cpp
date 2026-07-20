@@ -24,7 +24,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "poisson_gauge.h"
+#include "common/poisson_gauge.h"
 
 namespace lilytorch_kernels {
 

@@ -12,7 +12,7 @@
 #include <torch/library.h>
 #include <ATen/Parallel.h>
 
-#include "advection_schemes.h"
+#include "common/advection_schemes.h"
 
 namespace lilytorch_kernels {
 

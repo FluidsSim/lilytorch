@@ -136,7 +136,7 @@ CL7. `[deepseek-v4]` **Milestone-doc pruning** ✅ (2026-07-16): archive/mark-st
 
 ## Phase B — structure moves (after Phase A merges)
 
-CL8. `[deepseek-v4]` **`csrc/common/`**: move advection_schemes.h, bc_ops.h,
+CL8. `[deepseek-v4]` **`csrc/common/`** ✅ (2026-07-20): move advection_schemes.h, bc_ops.h,
   strain_rate.h, poisson_gauge.h (+ poisson_scratch.h for tidiness); update
   includes (.cpp → `"common/x.h"`, .cu → `"../common/x.h"`). No setup.py
   change (it globs .cpp/.cu only).

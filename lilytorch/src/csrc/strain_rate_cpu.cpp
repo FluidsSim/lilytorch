@@ -10,7 +10,7 @@
 #include <ATen/ATen.h>
 #include <ATen/Parallel.h>
 
-#include "strain_rate.h"
+#include "common/strain_rate.h"
 
 namespace lilytorch_kernels {
 

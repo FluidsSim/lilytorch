@@ -16,7 +16,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cub/block/block_reduce.cuh>
 
-#include "../bc_ops.h"
+#include "../common/bc_ops.h"
 
 namespace lilytorch_kernels {
 

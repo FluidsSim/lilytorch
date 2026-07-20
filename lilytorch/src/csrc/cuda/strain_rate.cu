@@ -14,7 +14,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include "../strain_rate.h"
+#include "../common/strain_rate.h"
 
 namespace lilytorch_kernels {
 

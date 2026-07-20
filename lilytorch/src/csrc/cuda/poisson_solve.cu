@@ -24,8 +24,8 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#include "../poisson_gauge.h"
-#include "../poisson_scratch.h"
+#include "../common/poisson_gauge.h"
+#include "../common/poisson_scratch.h"
 #include <torch/all.h>
 #include <torch/library.h>
 #include <torch/extension.h>

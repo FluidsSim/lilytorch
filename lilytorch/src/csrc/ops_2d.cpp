@@ -23,7 +23,7 @@
 #include <mutex>
 #include <vector>
 
-#include "bc_ops.h"
+#include "common/bc_ops.h"
 
 namespace lilytorch_kernels {
 

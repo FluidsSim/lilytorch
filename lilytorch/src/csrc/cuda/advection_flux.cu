@@ -30,7 +30,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-#include "../advection_schemes.h"
+#include "../common/advection_schemes.h"
 
 namespace lilytorch_kernels {
 
