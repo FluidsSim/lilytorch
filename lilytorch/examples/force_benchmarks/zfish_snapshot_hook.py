@@ -63,7 +63,7 @@ def _capture(self, u, v, w, p, iteration):
         "w": _cpu(w.contiguous()), "p": _cpu(p.contiguous()),
         # scalars the readout was called with
         "h": float(self.h), "h3": float(self.h3),
-        "eps_body": float(comp.bodies[0].eps),
+        "eps_body": float(comp.eps),
         "eps_solver": float(self.eps),
         "nu": float(self.nu), "rho": float(self.rho),
         "delta_order": int(self.force_delta_order),

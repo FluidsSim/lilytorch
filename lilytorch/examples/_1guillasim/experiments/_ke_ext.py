@@ -74,7 +74,7 @@ class KEFluidExtension(FluidExtension):
                 comp = getattr(fs, "composite_body", None)
                 sdf = getattr(comp, "sdf_val", None)
                 if sdf is not None and sdf.shape == ke.shape:
-                    eps = float(comp.bodies[0].eps)
+                    eps = float(comp.eps)
                     fluid = (sdf > eps)
                     ek_fl = 0.5 * float(hd) * float((ke * fluid).sum())
                 self._ke.append((self._it, ek_tot, ek_fl))

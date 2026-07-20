@@ -157,10 +157,16 @@ CL10. `[deepseek-v4]` **Shared `csrc/common/interp.h`** ✅ (2026-07-20): unify 
   **fp-parity:** the suite passed at the existing tolerance — no new ULP
   drift introduced.  The `std::max/std::min` vs bare `max/min` change in
   the unified header is numerically equivalent for all valid inputs.
-CL11. `[fable]` **eps single source of truth** per answer 8. Cross-cutting
-  correctness (forces δ-width, two-phase heaviside, BDIMhandler AABB margins
-  all read child eps); verify bit-identical forces on sphere + 1guilla
-  before/after.
+CL11. `[fable]` **eps single source of truth** ✅ (2026-07-20): per answer 8.
+  Collapsed the dual ``comp_eps``+``eps_mw`` kernel args to a single
+  ``self.eps`` cache key in both ``_fluid_step_fused_{2,3}d`` dispatches
+  (solver.py); forces.py now reads ``comp.eps`` (not ``comp.bodies[0].eps``)
+  for the δ-width; BDIMhandler.py uses ``comp.eps`` for AABB band margins
+  (not per-child ``body.eps``); two auxiliary diag scripts updated.
+  ``solver.eps = eps_multiplier * h`` is the single authority; the sync
+  ``comp.eps = float(self.eps)`` (solver.py:588) propagates it.  All 30
+  BDIM tests pass; no new failures introduced (366 pass / 1 skip baseline
+  parity — the 18 pre-existing failures are unrelated).
 
 ## Phase D — research / independent
 

@@ -82,7 +82,8 @@ def forces_method2(self, u, v, p, iteration):
 
         # Scalar kernel params must be python floats: passing a 0-d GPU tensor
         # forces a host-side conversion per launch (= a hidden device sync).
-        eps_body = self._cached_float('body0_eps', comp.bodies[0].eps)
+        # eps is the single BDIM half-width authority (solver.eps = eps_multiplier * h).
+        eps_body = self._cached_float('eps', comp.eps)
         interp_method = int(getattr(self, '_sdf_interp_method', 0))
         # 0 = union ndelta (default), 2 = per-body analytic normal (sm2).
         _fsm = int(getattr(self, 'force_submethod', 0))
@@ -231,7 +232,8 @@ def forces_method2_3d(self, u, v, w, p, iteration):
             nu_rho_field = nu_rho_scalar
 
         # Scalar kernel params must be python floats — see the 2-D twin.
-        eps_body = self._cached_float('body0_eps', comp.bodies[0].eps)
+        # eps is the single BDIM half-width authority (solver.eps = eps_multiplier * h).
+        eps_body = self._cached_float('eps', comp.eps)
         # 0 = union ndelta (default), 2 = per-body analytic normal (sm2).  Both
         # split the union force to links by the SAME partition of unity the
         # streaming body-velocity blend uses, so the ph_tau slot carries

@@ -546,7 +546,9 @@ class BDIMhandler:
                 # rather than the full padded table bounds.
                 cnt = getattr(body, 'cnt', None)
                 if cnt is not None and cnt.numel() > 2:
-                    _bm = float(getattr(body, 'eps', 0.05)) + 4.0 * h
+                    # eps is the single BDIM half-width authority:
+                    # solver.eps = eps_multiplier * h, synced to comp.eps.
+                    _bm = float(comp.eps) + 4.0 * h
                     body._stream_meta['local_aabb_lo'] = (
                         cnt.min(dim=1).values - _bm
                     )
@@ -1618,8 +1620,6 @@ class BDIMhandler:
         # sub-block mu/normals path without reading _sdf_sparse.
         comp._combined_union_aabb = tuple(
             v for ax in range(D) for v in (curr_lo[ax], curr_hi[ax]))
-        # Kernel forces are evaluated later from post-fluid-step fields.
-        comp._combined_forces_out = None
 
         # Stash per-step metadata (also read by the post-step force kernels).
         kstep = {
