@@ -115,9 +115,11 @@ class PositionController(KinematicsController):
 
         # If the first frame has non-zero joint targets but the MuJoCo
         # model initialises all joints to zero, the step discontinuity can
-        # trigger mjWARN_BADQACC.  Prepend a zero-row so that the first
-        # PD error is zero.
-        if not np.allclose(kinematics[0], 0.0):
+        # trigger mjWARN_BADQACC.  By default prepend a zero-row so that the
+        # first PD error is zero.  This behaviour can be disabled by
+        # setting control_pars['prepend_zero_row']=False in the config.
+        prepend_zero = config.get("prepend_zero_row", True)
+        if prepend_zero and not np.allclose(kinematics[0], 0.0):
             kinematics = np.vstack([np.zeros_like(kinematics[0]), kinematics])
             kinematics_start += kinematics_sampling
 

@@ -49,7 +49,7 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.compute_sdf                   = True
         self.use_gpu                       = True
-        self.use_bdim                      = False
+        self.use_bdim                      = True
         self.headless                      = False
         self.water_buoyancy                = True
         self.sdf_interp_method             = "triquadratic"
@@ -77,13 +77,13 @@ class SimConfig(BaseSimConfig):
                 "control_pars"   : {
                     "data_folder"      : self.data_folder,
                     "file_path"        : "ep248_Cl2_slow_fish13_model_angles.xlsx",
-                    "kinematics_invert": True,
+                    "kinematics_invert": False,
                     "lowpass_cutoff"   : 30,
                     "plot_kinematics"  : False,
                 },
                 "gains"     : [0.2, 0.001, 0],
                 "spawn_mode": SpawnMode.TRANSVERSE,
-                "pose"      : [0, 0, 0, 0, 0, 3.14+3.14/4],
+                "pose"      : [0, 0, 0, 0, 0, 3.14-3.14/4],
             },
         ]
 

@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from farms_core.sensors.sensor_convention import sc
+from scipy.signal import butter, filtfilt
 
 from lilytorch.integration.kinematics import kinematics_interpolation
 from lilytorch.util.metrics import compute_speed_PCA
@@ -103,9 +104,11 @@ def _load_com_velocity(run_dir: str):
 def _reconstruct_desired_positions(run_dir: str, n_joints: int, nt: int, timestep: float):
     """Reconstruct desired joint positions from the source xlsx kinematics file.
 
-    Mirrors the interpolation logic in KinematicsController.__init__ exactly:
-    load xlsx → trim columns → negate (invert_motors=True) → pad end → interpolate.
-    Returns an (nt, n_joints) array, or None if the config / xlsx is unavailable.
+    Mirrors the interpolation logic in the PD controller and KinematicsController:
+    load xlsx → trim time column if present → optional low-pass filter →
+    optional zero-row prepend for startup stability → interpolate to the simulation
+    timestep. Returns an (nt, n_joints) array, or None if the config / xlsx is
+    unavailable.
     """
     cfg_path = os.path.join(run_dir, "animat_config_0.yaml")
     if not os.path.exists(cfg_path):
@@ -121,45 +124,86 @@ def _reconstruct_desired_positions(run_dir: str, n_joints: int, nt: int, timeste
         if ctrl_cfg is None:
             return None
         data_folder = ctrl_cfg["data_folder"]
-        mode        = ctrl_cfg.get("mode", "slow")
-        sampling    = float(ctrl_cfg.get("kinematics_sampling", timestep))
+        file_path = ctrl_cfg.get("file_path")
+        sampling = float(ctrl_cfg.get("kinematics_sampling", timestep))
+        invert = bool(ctrl_cfg.get("kinematics_invert", True))
+        lowpass_cutoff = ctrl_cfg.get("lowpass_cutoff")
+        lowpass_order = int(ctrl_cfg.get("lowpass_order", 4))
     except Exception:
         return None
 
-    fname = "joints_positions_slow.xlsx" if mode == "slow" else "joints_positions_fast.xlsx"
-    xlsx_path = os.path.join(data_folder, fname)
+    if file_path is None:
+        mode = ctrl_cfg.get("mode", "slow")
+        fname = "joints_positions_slow.xlsx" if mode == "slow" else "joints_positions_fast.xlsx"
+        xlsx_path = os.path.join(data_folder, fname)
+    else:
+        xlsx_path = file_path
+        if not os.path.isabs(xlsx_path):
+            xlsx_path = os.path.join(data_folder, xlsx_path)
+
     if not os.path.exists(xlsx_path):
         return None
 
-    kin = pd.read_excel(xlsx_path).to_numpy(dtype=float)[:, :n_joints]
-    kin = -kin  # invert_motors=True
+    kin = pd.read_excel(xlsx_path).to_numpy(dtype=float)
+    if kin.shape[1] == n_joints + 1:
+        time_col = kin[:, 0]
+        sampling = float(np.median(np.diff(time_col)))
+        kin = kin[:, 1:]
+    elif kin.shape[1] < n_joints:
+        return None
+    else:
+        kin = kin[:, :n_joints]
 
-    # Build source time vector (no init_time padding, init_time=0)
-    data_duration = kin.shape[0] * sampling
-    time_vector   = np.arange(0, data_duration, sampling)
+    if lowpass_cutoff is not None and lowpass_cutoff > 0:
+        fs = 1.0 / sampling
+        nyq = 0.5 * fs
+        b, a = butter(lowpass_order, lowpass_cutoff / nyq, btype="low")
+        kin = np.column_stack([
+            filtfilt(b, a, kin[:, j])
+            for j in range(kin.shape[1])
+        ])
 
-    # Pad at end so interpolation covers the full simulation
-    # n_iterations (for interpolation) = nt-1 to match FARMS convention:
-    # FARMS stores nt = n_iterations+1 frames (iter 0 .. n_iterations)
-    n_iter   = nt - 1
+    if invert:
+        kin = -kin
+
+    # Mirror the controller's startup prepend: a zero-row is inserted when the
+    # first target frame is non-zero, so the first PD error starts from zero.
+    raw_kin = kin
+    if not np.allclose(raw_kin[0], 0.0):
+        kin = np.vstack([np.zeros_like(raw_kin[0]), raw_kin])
+        time_vector = np.arange(0, raw_kin.shape[0] * sampling, sampling) + sampling
+        time_vector = np.insert(time_vector, 0, 0.0)
+    else:
+        kin = raw_kin
+        time_vector = np.arange(0, raw_kin.shape[0] * sampling, sampling)
+
+    # Add end-time padding to cover the full simulation.
+    n_iter = nt - 1
     end_time = timestep * n_iter
-    n_pad    = int(end_time / sampling) + 1
-    kin         = np.concatenate([kin, np.tile(kin[-1], (n_pad, 1))], axis=0)
-    time_vector = np.concatenate([
-        time_vector,
-        np.linspace(time_vector[-1] + timestep, time_vector[-1] + end_time, n_pad),
-    ])
+    if end_time > 0:
+        kin = np.insert(
+            arr=kin,
+            obj=kin.shape[0],
+            values=np.repeat(a=[kin[-1, :]], repeats=int(end_time / sampling) + 1, axis=0),
+            axis=0,
+        )
+        time_vector = np.insert(
+            arr=time_vector,
+            obj=time_vector.shape[0],
+            values=np.linspace(
+                time_vector[-1] + timestep,
+                time_vector[-1] + end_time,
+                int(end_time / sampling) + 1,
+            ),
+        )
 
-    # Interpolate to simulation timesteps: gives n_iter rows (iter 0 .. n_iter-1)
     interp = kinematics_interpolation(
         kin_times=time_vector,
         kinematics=kin,
         timestep=timestep,
         n_iterations=n_iter,
-    )  # shape (n_iter, n_joints)
-
-    # Append last row so shape matches (nt, n_joints)
-    return np.concatenate([interp, interp[[-1]]], axis=0)
+    )
+    return interp
 
 
 def _load_joint_tracking(run_dir: str):

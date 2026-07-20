@@ -11,7 +11,7 @@
 > `band_treatment_check.py` were needed (never-run harness had drifted): mock
 > `fluid_solver` needed device/dtype/blend attrs, and the const-p gauge is now
 > normalised by buoyancy (a single closed body's whole force is ~0, so it can't
-> be the scale). Not committed — working tree on `cuda_native_port`.
+> be the scale). Committed as `fbba817` on `cuda_native_port`.
 
 ---
 

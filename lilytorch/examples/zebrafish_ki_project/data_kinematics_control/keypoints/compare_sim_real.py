@@ -91,33 +91,121 @@ def load_real_kinematics(speed_type: str):
     return times, angles
 
 
-def load_real_speed(speed_type: str):
-    """Return (time_s, speed_bl_s) computed from head-point displacement.
+def _fwd_speed_from_positions(times, x, y, heading_rad, window_s: float = 0.030):
+    """Forward speed along the body axis from position differences.
 
-    Speed is smoothed with a Gaussian kernel (σ ≈ 5 ms).
+    Uses a centred sliding window of *window_s* seconds to estimate the
+    local displacement, projects it onto the instantaneous body heading,
+    and divides by the window duration.  Robust against keypoint jitter.
+
+    Parameters
+    ----------
+    times : (nt,) array — seconds
+    x, y  : (nt,) arrays — COM positions (any consistent units)
+    heading_rad : (nt,) array — body heading angle for each time step
+    window_s : float — window duration in seconds (default 30 ms)
+
+    Returns
+    -------
+    fwd_speed : (nt,) array — forward speed (same units as x, y per second)
     """
+    n = len(times)
+    fwd_speed = np.zeros(n)
+    for i in range(n):
+        t_center = times[i]
+        lo = max(0, np.searchsorted(times, t_center - window_s / 2))
+        hi = min(n - 1, np.searchsorted(times, t_center + window_s / 2))
+        if hi > lo:
+            dx = x[hi] - x[lo]
+            dy = y[hi] - y[lo]
+            dt = times[hi] - times[lo]
+            # Project displacement onto the body heading at this timestep
+            hx = np.cos(heading_rad[i])
+            hy = np.sin(heading_rad[i])
+            fwd_disp = dx * hx + dy * hy
+            fwd_speed[i] = fwd_disp / dt if dt > 0 else 0.0
+    return fwd_speed
+
+
+def _central_diff(y, dt, half_width=4):
+    """Central difference derivative over a (2*half_width+1)-point stencil.
+
+    Uses second-order finite differences in the interior and forward/
+    backward differences near the boundaries.  A wider stencil acts as
+    a low-pass filter on the derivative, suppressing sample-to-sample
+    noise that single-frame differences would amplify.
+    """
+    n = len(y)
+    dy = np.zeros(n)
+    hw = half_width
+    for i in range(n):
+        lo = max(0, i - hw)
+        hi = min(n - 1, i + hw)
+        if hi > lo:
+            dy[i] = (y[hi] - y[lo]) / ((hi - lo) * dt)
+    return dy
+
+
+def load_real_speed(speed_type: str):
+    """Return (time_s, fwd_speed_bl_s) using compute_speed_PCA on keypoints.
+
+    Treats each keypoint as a virtual "link" and computes forward speed
+    via the same PCA-based method used for the simulation.  Keypoint
+    positions are low-pass filtered at 30 Hz before computing velocities
+    to suppress DLC pixel jitter — matching the filter applied to the
+    joint angles in the PD controller.
+    """
+    from scipy.signal import butter, filtfilt
+
     fname = _REAL_FILES[speed_type]["xy_bl"]
     path = os.path.join(_KEYPOINTS_DIR, fname)
 
     df = pd.read_csv(path)
     times = df["time_ms"].values.astype(float) / 1000.0
+    dt = np.median(np.diff(times))
+    fs = 1.0 / dt
+    cutoff = 30.0  # same 30 Hz lowpass as PD controller
 
-    # Head point = first tracked point
-    x = df["x1_BL"].values.astype(float)
-    y = df["y1_BL"].values.astype(float)
+    x_cols = [c for c in df.columns if c.startswith("x")]
+    y_cols = [c for c in df.columns if c.startswith("y")]
+    n_kp = len(x_cols)
 
-    # Finite-difference velocity (central differences, forward/backward at ends)
-    dt = np.gradient(times)
-    vx = np.gradient(x) / dt
-    vy = np.gradient(y) / dt
-    speed_bl_s = np.sqrt(vx**2 + vy**2)
+    # Low-pass filter keypoint positions to suppress pixel jitter
+    b, a = butter(4, cutoff / (0.5 * fs), btype="low")
+    x_raw = df[x_cols].values.astype(float)   # (nt, n_kp) in BL
+    y_raw = df[y_cols].values.astype(float)
+    x_filt = np.column_stack([filtfilt(b, a, x_raw[:, j]) for j in range(n_kp)])
+    y_filt = np.column_stack([filtfilt(b, a, y_raw[:, j]) for j in range(n_kp)])
 
-    # Light Gaussian smoothing
+    # Build (nt, n_kp, 3) arrays (z=0)
+    links_pos = np.zeros((len(times), n_kp, 3))
+    links_pos[:, :, 0] = x_filt
+    links_pos[:, :, 1] = y_filt
+
+    # Velocities via central differences over a 9-sample stencil (~1.5 ms)
+    # to further suppress residual high-frequency noise that np.gradient
+    # would amplify at 6000 Hz.  MuJoCo link velocities are analytical;
+    # real keypoints need this extra smoothing for a fair comparison.
+    stencil = 4  # half-width → 9-point central difference
+    links_vel = np.zeros_like(links_pos)
+    for j in range(n_kp):
+        links_vel[:, j, 0] = _central_diff(x_filt[:, j], dt, stencil)
+        links_vel[:, j, 1] = _central_diff(y_filt[:, j], dt, stencil)
+
+    v_fwd_bl, _ = compute_speed_PCA(links_pos, links_vel)
+    v_fwd_bl = np.asarray(v_fwd_bl)
+
+    # Light Gaussian smooth on the final speed trace to match the temporal
+    # resolution of the MuJoCo-derived PCA speed (which is inherently
+    # smoother because MuJoCo velocities are analytical, not estimated).
     from scipy.ndimage import gaussian_filter1d
-    sigma = max(1, int(0.005 / np.median(dt)))  # ~5 ms
-    speed_bl_s = gaussian_filter1d(speed_bl_s, sigma=sigma)
+    sigma = max(1, int(0.005 / dt))  # ~5 ms, same as original code
+    v_fwd_bl = gaussian_filter1d(v_fwd_bl, sigma=sigma)
 
-    return times, speed_bl_s
+    return times, v_fwd_bl
+
+    v_fwd_bl, _ = compute_speed_PCA(links_pos, links_vel)
+    return times, np.asarray(v_fwd_bl)
 
 
 # ---------------------------------------------------------------------------
@@ -219,9 +307,8 @@ def plot_comparison(
     t_real_spd, real_speed_bl_s = load_real_speed(speed_type)
 
     # ── Load simulation data ─────────────────────────────────────────
-    t_sim, sim_joints, sim_v_fwd, sim_v_lat = load_sim_data(sim_dir)
-    sim_speed_m_s = np.sqrt(sim_v_fwd**2 + sim_v_lat**2)
-    sim_speed_bl_s = sim_speed_m_s / _MODEL_BL
+    t_sim, sim_joints, sim_v_fwd, _sim_v_lat = load_sim_data(sim_dir)
+    sim_speed_bl_s = np.asarray(sim_v_fwd) / _MODEL_BL  # PCA forward speed
 
     # ── Align time axes: start both at t=0 ──────────────────────────
     t_real_ang = t_real_ang - t_real_ang[0]
@@ -262,9 +349,9 @@ def plot_comparison(
 
     # --- Speed comparison ---
     ax_speed.plot(t_real_spd, real_speed_bl_s,
-                  label="Real (head displacement)", color="black", linewidth=1.8)
+                  label="Real (PCA fwd speed)", color="black", linewidth=1.8)
     ax_speed.plot(t_sim, sim_speed_bl_s,
-                  label="Simulation (PCA COM speed)", color="#2196F3", linewidth=1.8)
+                  label="Simulation (PCA fwd speed)", color="#2196F3", linewidth=1.8)
     ax_speed.set_title("Swimming Speed" + title_suffix)
     ax_speed.set_xlabel("Time [s]")
     ax_speed.set_ylabel("Speed [BL/s]")

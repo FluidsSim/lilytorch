@@ -284,8 +284,8 @@ def run_angles_extrapolation(
 
 
 if __name__ == '__main__':
-    # run_angles_extrapolation('slow')
-    run_angles_extrapolation('fast')
+    run_angles_extrapolation('slow')
+    # run_angles_extrapolation('fast')
 
 
 

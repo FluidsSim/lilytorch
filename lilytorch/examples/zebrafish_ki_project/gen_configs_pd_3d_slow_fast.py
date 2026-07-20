@@ -67,6 +67,9 @@ class SimConfig(BaseSimConfig):
         self.bdim_mu0_projection           = False
         self.bdim_body_div_correction      = True
 
+        self.sample_offset_pressure_cells = 0
+        self.sample_offset_friction_cells = 0
+
 
         # Wall contact for a milligram-scale larva. The previous direct
         # (-stiffness, -damping) = (-2e4, -3e2) form put 20000 N/m against a
