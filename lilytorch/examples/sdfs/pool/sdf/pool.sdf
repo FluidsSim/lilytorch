@@ -1,0 +1,150 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="pool">
+      <pose>0 0 0 0 0 0</pose>
+      <link name="wall_xmin">
+        <pose>-1.005 0.0 0.005 0 0 0</pose>
+        <collision name="wall_xmin_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.01 1.02 0.51</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="wall_xmin_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.01 1.02 0.51</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.78 0.74 0.68 0.3</ambient>
+            <diffuse>0.88 0.84 0.78 0.3</diffuse>
+            <specular>0.30 0.28 0.25 0.3</specular>
+            <emissive>0.0  0.0  0.0  0.3</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="wall_xmax">
+        <pose>1.005 0.0 0.005 0 0 0</pose>
+        <collision name="wall_xmax_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.01 1.02 0.51</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="wall_xmax_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.01 1.02 0.51</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.78 0.74 0.68 0.3</ambient>
+            <diffuse>0.88 0.84 0.78 0.3</diffuse>
+            <specular>0.30 0.28 0.25 0.3</specular>
+            <emissive>0.0  0.0  0.0  0.3</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="wall_ymin">
+        <pose>0.0 -0.505 0.005 0 0 0</pose>
+        <collision name="wall_ymin_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>2.02 0.01 0.51</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="wall_ymin_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>2.02 0.01 0.51</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.78 0.74 0.68 0.3</ambient>
+            <diffuse>0.88 0.84 0.78 0.3</diffuse>
+            <specular>0.30 0.28 0.25 0.3</specular>
+            <emissive>0.0  0.0  0.0  0.3</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="wall_ymax">
+        <pose>0.0 0.505 0.005 0 0 0</pose>
+        <collision name="wall_ymax_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>2.02 0.01 0.51</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="wall_ymax_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>2.02 0.01 0.51</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.78 0.74 0.68 0.3</ambient>
+            <diffuse>0.88 0.84 0.78 0.3</diffuse>
+            <specular>0.30 0.28 0.25 0.3</specular>
+            <emissive>0.0  0.0  0.0  0.3</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="floor">
+        <pose>0.0 0.0 -0.255 0 0 0</pose>
+        <collision name="floor_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>2.02 1.02 0.01</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="floor_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>2.02 1.02 0.01</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.78 0.74 0.68 0.3</ambient>
+            <diffuse>0.88 0.84 0.78 0.3</diffuse>
+            <specular>0.30 0.28 0.25 0.3</specular>
+            <emissive>0.0  0.0  0.0  0.3</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="ground_bg">
+        <pose>0.0 0.0 -0.275 0 0 0</pose>
+        <visual name="ground_bg_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>100 100 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.0 0.0 0.0 1.0</ambient>
+            <diffuse>0.0 0.0 0.0 1.0</diffuse>
+            <specular>0.0 0.0 0.0 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

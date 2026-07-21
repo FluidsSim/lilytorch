@@ -7,7 +7,7 @@ import numpy as np
 
 
 def _kernel_extensions():
-    """Build the ``lilytorch.src.kernels._C`` CUDA extension.
+    """Build the ``lilytorch.src._C`` CUDA extension.
 
     Skipped (returns []) when:
       * ``LILYTORCH_NO_CUDA=1`` is set, or
@@ -49,17 +49,29 @@ def _kernel_extensions():
     # parallel implementation via ``#ifdef INTRA_OP_PARALLEL``, which is
     # defined in ATen/ParallelOpenMP.h only when ``_OPENMP`` is set --
     # i.e. only when the calling translation unit is compiled with
-    # ``-fopenmp``. Without it, every ``at::parallel_for`` call in our
+    # ``-fopenmp``.  Without it, every ``at::parallel_for`` call in our
     # kernels silently falls back to a serial loop, even though
     # ``torch.set_num_threads(N)`` is in effect. So OpenMP linkage IS
     # required for our ``.cpp`` sources to actually multithread.
     use_openmp = os.environ.get("LILYTORCH_NO_OPENMP", "0") != "1"
+    # NOTE: do NOT add ``--use_fast_math`` to the nvcc flags.  It was tried
+    # (b3657de) and reverted: it buys nothing and costs the parity gates.
+    # * Measured: a wash.  Stencil kernels (diffuse_add, rbgs, prolongate) are
+    #   bandwidth-bound and the body-update path is host-marshalling-bound, so
+    #   cheaper div/sqrt/exp is invisible -- the A/B came back 0.93x-1.13x,
+    #   i.e. noise in both directions, on every kernel benched.
+    # * It costs correctness headroom: the flag implies -ftz (denormals to
+    #   zero) plus approximate div/sqrt/transcendentals, and the solver's
+    #   DEFAULT production dtype is fp32.  It pushed the native-vs-reference
+    #   gates in test_native_step_region.py to 2 ULP (2.38e-7 vs a 2e-7 tol),
+    #   failing 9 of them -- those gates are the correctness contract of the
+    #   native port, and they are not worth trading for an unmeasurable win.
     extra_compile_args = {
         "cxx": [
             "-O0" if debug_mode else "-O3",
             "-fdiagnostics-color=always",
         ],
-        "nvcc": ["-O0" if debug_mode else "-O3"],
+        "nvcc": [("-O0" if debug_mode else "-O3")],
     }
     extra_link_args = []
     if use_openmp:
@@ -71,7 +83,7 @@ def _kernel_extensions():
         extra_link_args.extend(["-O0", "-g"])
 
     here = os.path.dirname(os.path.abspath(__file__))
-    csrc = os.path.join("lilytorch", "src", "kernels", "csrc")
+    csrc = os.path.join("lilytorch", "src", "csrc")
     abs_csrc = os.path.join(here, csrc)
     sources = sorted(glob.glob(os.path.join(abs_csrc, "*.cpp")))
     if use_cuda:
@@ -82,7 +94,7 @@ def _kernel_extensions():
 
     return [
         Extension(
-            name="lilytorch.src.kernels._C",
+            name="lilytorch.src._C",
             sources=sources,
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,

@@ -223,20 +223,20 @@ provides a ``gen_configs_*.py`` file that builds the YAML on the fly:
 .. code-block:: bash
 
    # 2-D anguilliform eel pinned in a channel
-   python -m lilytorch.farms_examples._1guillasim.gen_configs_one_pinned_2d
+   python -m lilytorch.examples._1guillasim.gen_configs_one_pinned_2d
 
    # 3-D anguilliform eel swimming freely
-   python -m lilytorch.farms_examples._1guillasim.gen_configs_one_free_3d
+   python -m lilytorch.examples._1guillasim.gen_configs_one_free_3d
 
    # 3-D free-swimming submarine with a propeller
-   python -m lilytorch.farms_examples.submarine.gen_configs_drag
+   python -m lilytorch.examples.submarine.gen_configs_drag
 
 Some validation cases are shipped as FARMS experiment bundles and are
 launched with ``farmsim``:
 
 .. code-block:: bash
 
-   cd lilytorch/farms_examples/single_sphere_drop_gazzola
+   cd lilytorch/examples/single_sphere_drop_gazzola
    ./run.sh   # invokes farmsim with experiment_config.yaml
 
 Output is written under the folder specified by ``output.save_path`` in
@@ -280,7 +280,7 @@ Project layout
    │   ├── gamepad.py       Optional gamepad input (incl. paddling mode)
    │   └── gen_pool_sdf.py  Generate pool / arena SDF XML for MuJoCo
    ├── FARMS_V2/            FARMS submodules setup
-   ├── farms_examples/      Ready-to-run examples (2-D & 3-D)
+   ├── examples/      Ready-to-run examples (2-D & 3-D)
    ├── util/                I/O, YAML, path helpers
    └── validation/          Validation & benchmarking scripts
 

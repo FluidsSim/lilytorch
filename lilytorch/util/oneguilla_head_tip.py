@@ -12,7 +12,7 @@ from lilytorch.util.paths import lilytorch_repo_root, save_path
 
 _HEAD_VISUAL_MESH_PATH = (
     Path(lilytorch_repo_root)
-    / "farms_examples"
+    / "examples"
     / "sdfs"
     / "1guilla"
     / "meshes"

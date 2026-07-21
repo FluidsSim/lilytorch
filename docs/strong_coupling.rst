@@ -197,7 +197,7 @@ Add a ``coupling`` block to the ``body`` section of the ``bdim_yaml``
        tol: 1.0e-4             # relative interface-residual tolerance
        max_iter: 30            # max coupling sweeps per step
 
-For a :class:`~lilytorch.farms_examples.base_sim_config.BaseSimConfig`
+For a :class:`~lilytorch.examples.base_sim_config.BaseSimConfig`
 swimmer, set the attribute instead::
 
    self.coupling = {"scheme": "implicit", "accelerator": "iqn-ils",

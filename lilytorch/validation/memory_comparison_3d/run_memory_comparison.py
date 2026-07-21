@@ -2,6 +2,12 @@
 """
 GPU memory comparison across solver modes — 2-D and 3-D pinned 1guilla.
 
+.. note:: PARKED — the python/kernel ``solver_method`` modes were collapsed
+   into the single fused path (``solver_method`` is deprecated and ignored),
+   so the two "modes" below now run the identical solver and the comparison
+   is moot.  The script is kept for its per-phase / per-tensor memory
+   instrumentation, which still works on the fused path.
+
 This is the *measurement* counterpart to ``docs/memory_analysis.md``.  It
 runs the same FARMS-coupled pinned 1guilla scenario used in the cost
 analysis (``lilytorch/validation/cost_analysis/``) under the reference
@@ -255,10 +261,6 @@ def _parse_args() -> argparse.Namespace:
             "(Driver only) Skip a mode if its JSON file already exists.  "
             "Useful for incremental sweeps."
         ),
-    )
-    parser.add_argument(
-        "--compile_adv_diff", action="store_true", default=False,
-        help="Enable torch.compile for the advection-diffusion solver (default: off).",
     )
     parser.add_argument(
         "--mem_dbg", action="store_true", default=False,
@@ -714,11 +716,10 @@ def _run_worker(args: argparse.Namespace) -> None:
         _record(f"step {idx:03d} [{mode}]: after update (union SDF+body_vel)")
 
         # 2. mu / normals
-        # In kernel 3-D mode, mu0/mu1 and normals are computed inside
-        # the CUDA kernel during fluid_step (Phase I). sdf_val_u/v/w
-        # are not allocated on MultiAnimatBodies in that mode, so
-        # _recompute_mu_normals must not be called (mirrors step_() guard).
-        if not (fs._use_kernels and fs.ndim == 3):
+        # The fused step computes mu0/mu1 and normals in registers inside
+        # bdim_apply; the python full-grid pack is only built when the
+        # python force readout needs it (mirrors advance_and_compute_loads).
+        if fs._needs_python_mu_normals():
             fs._recompute_mu_normals()
             _record(f"step {idx:03d} [{mode}]: after mu/normals")
         else:
@@ -790,8 +791,6 @@ def _run_worker(args: argparse.Namespace) -> None:
         # 4. forces
         if self.ndim == 3:
             fs.forces_method2_3d(fs.u0, fs.v0, fs.w0, fs.p0, iteration)
-        elif self.force_method == "method1":
-            fs.forces_method1(fs.u0, fs.v0, fs.p0, iteration)
         else:
             fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
         _record(f"step {idx:03d} [{mode}]: after forces")
@@ -1008,7 +1007,6 @@ def _run_worker(args: argparse.Namespace) -> None:
     print(f" MEMORY SUMMARY — mode={mode}  dim={args.dim}  "
           f"grid={grid_label((args.Nx, args.Ny) if args.dim == 2 else (args.Nx, args.Ny, args.Nz))}"
           f"  n_bodies={args.n_bodies}")
-    print(f"  compile: adv_diff={getattr(args,'compile_adv_diff',False)}")
     print(sep)
     print(f"  Persistent baseline (after warmup):  {persistent_mb:8.1f} MB  [torch.cuda.memory_allocated()]")
     print(f"  Step peak (alloc):                   {step_peak:8.1f} MB  [torch.cuda.max_memory_allocated()]")
@@ -1254,7 +1252,6 @@ def _build_cfg(args: argparse.Namespace, mode: str):
     cfg.poisson_warm_start      = True
     cfg.poisson_smoother        = "rbgs"
     cfg.poisson_nsmoothing      = 2
-    cfg.compile_adv_diff        = getattr(args, 'compile_adv_diff', False)
     cfg.dtype                   = args.dtype
     cfg.timestep                = args.timestep
     if hasattr(cfg, "bdim_dt"):

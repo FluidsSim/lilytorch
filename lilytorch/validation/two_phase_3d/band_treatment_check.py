@@ -281,25 +281,23 @@ def _heaviside_t(phi, eps):
     return 0.5 * (1.0 + x + torch.sin(math.pi * x) / math.pi)
 
 
-def kernel_deltaH_parity(grid_n=56, extent=0.4):
-    """Native CUDA/CPU deltaH force op  vs  python ∂H-partition reference.
+def kernel_ndelta_gauge(grid_n=56, extent=0.4):
+    """Gauge property of the union ndelta readout (the reason deltaH existed).
 
     Builds the streaming-kernel force state directly (real sphere SDF textures,
-    no FARMS) and runs ``streaming_sdf_forces_post_3d`` with ``force_submethod``
-    = ndelta and deltaH.  The deltaH per-body pressure force/torque must match a
-    python reimplementation of ``TwoPhaseSolver._apply_partition_heaviside``
-    (union-∂H density split by a softmin partition of unity) to tight tolerance,
-    using ``interp_3d`` to reproduce the kernel's exact per-body SDF sampling.
-
-    Checks, on single / dumbbell / 3-link-chain bodies:
-      * per-body deltaH == python reference          (seam handling)
-      * Σ_b deltaH == python union ∂H force           (partition of unity)
-      * deltaH viscous channels == ndelta viscous     (ndelta unchanged)
+    no FARMS) and runs ``streaming_sdf_forces_post_3d`` with the default union
+    ndelta submethod (0) on single / dumbbell / 3-link-chain bodies.  The union
+    band measure is summation-by-parts, so:
+      * constant p      -> Σ_b F_p == 0  (no spurious net force / gauge leak)
+      * hydrostatic p   -> horizontal net == 0, vertical net != 0 (buoyancy)
+    This is the frozen-field proxy for the live two-phase acceptance test;
+    union-∇H subsumes the retired deltaH readout everywhere deltaH was used.
     """
     import types
     import numpy as np
     from lilytorch.integration.BDIMhandler import BDIMhandler
-    from lilytorch.src.kernels import streaming_sdf_forces_post_3d, interp_3d
+    from lilytorch.src.forces import streaming_sdf_forces_post_3d
+    from lilytorch.src.native import interp_3d
 
     DT = torch.float64
     DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -343,10 +341,16 @@ def kernel_deltaH_parity(grid_n=56, extent=0.4):
     def case(bodies, label):
         comp, gs = mk_comp(grid_n, bodies); h = comp.h; B = len(bodies)
         hd = BDIMhandler.__new__(BDIMhandler)
-        hd.ndim = 3; hd.device = DEV; hd.dtype = DT; hd.dtype_np = np.float64
+        # The mock scene tensors (comp.sdf_val, comp.g*_1d, body SDF tables) live
+        # on CPU, so the streaming marshalling runs on CPU (eager path); the force
+        # op below is then handed CPU→DEV copies.  fs must carry device/dtype and
+        # the blend width that _launch_body_update now reads.
+        hd.ndim = 3; hd.device = "cpu"; hd.dtype = DT; hd.dtype_np = np.float64
         hd._sim_axes = [0, 1, 2]
         hd.fluid_solver = types.SimpleNamespace(
-            composite_body=comp, grid_shape=gs, _use_kernels=True)
+            composite_body=comp, grid_shape=gs,
+            device="cpu", dtype=DT, _body_vel_blend_cells=0.0,
+            _sdf_interp_method=0)
         hd.force_method = "eulerian"
         hd.gather_data = types.MethodType(lambda self, it, k=kin_id(bodies): k, hd)
         hd._update_streaming_multi(0.0, 0)
@@ -369,68 +373,51 @@ def kernel_deltaH_parity(grid_n=56, extent=0.4):
         shapes = st["body_shapes"].to(DEV); meta = to(st["body_meta"])
         kin_t = to(sp["kin"]); a_lo = sp["aabb_lo"].to(DEV); a_dim = sp["aabb_dim"].to(DEV)
         mv = int(sp["max_vol"])
-        p = (1000.0 * 9.81 * (extent - Zg) + 30.0 * torch.sin(8*Xg) * torch.cos(6*Yg)).to(DT)
-        p = to(p).contiguous(); z = torch.zeros(gs, dtype=DT, device=DEV).contiguous()
+        # ---- constant-p gauge: the union net force must vanish (SBP) --------
+        p_const = torch.full(gs, 1234.0, dtype=DT, device=DEV).contiguous()
+        # ---- hydrostatic p: horizontal net vanishes, vertical = buoyancy ----
+        p_hydro = to((1000.0 * 9.81 * (extent - Zg)).to(DT)).contiguous()
+        z = torch.zeros(gs, dtype=DT, device=DEV).contiguous()
         nu_rho = torch.zeros(1, dtype=DT, device=DEV)
 
-        def run_op(fsm):
+        def run_op(pf):
             out = torch.zeros((B, 12), dtype=torch.float64, device=DEV)
+            # submethod 0 = union ndelta; nu_rho=0 so only the pressure channel
+            # is exercised (the viscous channel is trivially zero).
             streaming_sdf_forces_post_3d(
                 F_flat, F_off, shapes, meta, kin_t, a_lo, a_dim, gx, gy, gz,
-                h, mv, sdf_val, 0, z, z, z, p, nu_rho,
-                eps_body, 0.0, h3, 1, out, fsm, ph_tau)
+                h, mv, sdf_val, 0, z, z, z, pf, nu_rho,
+                eps_body, 0.0, 0.0, h3, 1, out, 0, ph_tau)
             if DEV == "cuda": torch.cuda.synchronize()
             return out
 
-        out_nd, out_dH = run_op(0), run_op(1)
-        visc_diff = (out_nd[:, 0:6] - out_dH[:, 0:6]).abs().max().item()
+        # ---- hydrostatic p FIRST: it gives the physical force scale ----------
+        fp_h = run_op(p_hydro)[:, 6:9].sum(0)          # union net, hydrostatic p
+        horiz = max(abs(float(fp_h[0])), abs(float(fp_h[1])))
+        vert = abs(float(fp_h[2]))                      # buoyancy scale (O(rho g V))
+        hstat_ok = (vert > 100.0 * horiz)
 
-        H = _heaviside_t(sdf_val, eps_body)
-        fd = [-(p) * torch.gradient(H, spacing=h, dim=d, edge_order=2)[0] for d in range(3)]
-        lo_h = a_lo.cpu().numpy(); dim_h = a_dim.cpu().numpy()
-        Xd, Yd, Zd = to(Xg).contiguous(), to(Yg).contiguous(), to(Zg).contiguous()
-        s_stack = torch.full((B, *gs), 1e6, dtype=DT, device=DEV)
-        K = kin_t.cpu().numpy(); Mt = meta.cpu().numpy()
-        for b in range(B):
-            i0, j0, k0 = lo_h[b]; Ai, Aj, Ak = dim_h[b]
-            sl = (slice(int(i0), int(i0+Ai)), slice(int(j0), int(j0+Aj)), slice(int(k0), int(k0+Ak)))
-            xs, ys, zs = Xd[sl].reshape(-1), Yd[sl].reshape(-1), Zd[sl].reshape(-1)
-            Kb = K[b]; r = Kb[:9].reshape(3, 3)
-            dxw, dyw, dzw = xs - Kb[9], ys - Kb[10], zs - Kb[11]
-            bxq = r[0,0]*dxw + r[0,1]*dyw + r[0,2]*dzw
-            byq = r[1,0]*dxw + r[1,1]*dyw + r[1,2]*dzw
-            bzq = r[2,0]*dxw + r[2,1]*dyw + r[2,2]*dzw
-            Mx, My, Mz = int(shapes[b,0]), int(shapes[b,1]), int(shapes[b,2])
-            Fb = F_flat[int(F_off[b]):int(F_off[b])+Mx*My*Mz].reshape(Mx, My, Mz).contiguous()
-            sb = interp_3d(Fb, bxq.contiguous(), byq.contiguous(), bzq.contiguous(),
-                           Mt[b,0], Mt[b,1], Mt[b,2], Mt[b,6], Mt[b,7], Mt[b,8],
-                           Mx, My, Mz, "linear")
-            s_stack[b][sl] = sb.reshape(int(Ai), int(Aj), int(Ak))
-        w = torch.softmax(-s_stack / ph_tau, dim=0)
-        ref = torch.zeros((B, 6), dtype=torch.float64, device=DEV)
-        for b in range(B):
-            wb = w[b]; fbx, fby, fbz = wb*fd[0], wb*fd[1], wb*fd[2]
-            ref[b, 0] = fbx.to(torch.float64).sum()*h3
-            ref[b, 1] = fby.to(torch.float64).sum()*h3
-            ref[b, 2] = fbz.to(torch.float64).sum()*h3
-            ax, ay, az = Xd-K[b,12], Yd-K[b,13], Zd-K[b,14]
-            ref[b, 3] = (ay*fbz - az*fby).to(torch.float64).sum()*h3
-            ref[b, 4] = (az*fbx - ax*fbz).to(torch.float64).sum()*h3
-            ref[b, 5] = (ax*fby - ay*fbx).to(torch.float64).sum()*h3
-        ker = out_dH[:, 6:12]
-        scale = ref.abs().max().clamp_min(1e-12)
-        pb = (ker - ref).abs().max().item()
-        union = torch.stack([fd[d].to(torch.float64).sum()*h3 for d in range(3)])
-        sumdiff = (ker[:, 0:3].sum(0) - union).abs().max().item()
-        ok = (pb / float(scale) < 1e-9) and (visc_diff == 0.0)
-        print(f"  {label:20s} per-body Δ={pb:.2e} (rel {pb/float(scale):.1e})"
-              f"  Σ_b-union Δ={sumdiff:.2e}  visc(nd==dH) Δ={visc_diff:.1e}"
+        # ---- constant-p gauge: the union net force must vanish (SBP) ---------
+        # Normalise by the buoyancy scale, NOT the per-body force.  For a SINGLE
+        # closed body the ENTIRE per-body force is ~0 under constant p (the
+        # discrete ∮ ∂_iH dV = 0), so the per-body magnitude is itself machine
+        # noise and cannot serve as a scale (it would trip a clamp and read as a
+        # false leak).  The multi-body partition cancellation is still exercised:
+        # a real gauge leak scales with the constant-p magnitude, not with eps.
+        fp_c = run_op(p_const)[:, 6:9]
+        net = fp_c.sum(0).abs().max().item()           # union net -> ~0 by SBP
+        rel = net / max(vert, 1e-30)
+        gauge_ok = rel < 1e-9
+
+        ok = gauge_ok and hstat_ok
+        print(f"  {label:20s} const-p net/buoy={rel:.1e}"
+              f"  hydro |Fh|={horiz:.2e} Fz={vert:.2e}"
               f"  [{'OK' if ok else 'FAIL'}]")
         return ok
 
     print("=" * 70)
-    print(f"  KERNEL deltaH ∂H-partition  vs  python reference   (dev={DEV}, {grid_n}^3)")
-    print("  per-body == python _apply_partition_heaviside ; Σ_b == union ; ndelta unchanged")
+    print(f"  UNION ndelta gauge property  (dev={DEV}, {grid_n}^3)")
+    print("  constant p -> union net force == 0 (SBP) ; hydrostatic p -> vertical only")
     print("=" * 70)
     cc = 0.2; hh = extent / (grid_n - 1)
     ok = True
@@ -440,39 +427,27 @@ def kernel_deltaH_parity(grid_n=56, extent=0.4):
     ok &= case([mk_body([cc-0.06, cc, cc], 0.035, 0.06, 29, hh),
                 mk_body([cc, cc, cc], 0.04, 0.065, 29, hh),
                 mk_body([cc+0.06, cc, cc], 0.035, 0.06, 29, hh)], "three-link chain (seam)")
-    print(f"  => KERNEL deltaH PARITY: {'PASSED' if ok else 'FAILED'}")
+    print(f"  => UNION ndelta GAUGE: {'PASSED' if ok else 'FAILED'}")
     print()
     return ok
 
 
 def main(pts_per_D=16, n_settle=300):
-    kernel_deltaH_parity()
+    # kernel_ndelta_gauge is the frozen proxy for the live two-phase acceptance
+    # test: it drives the native union-∇H readout directly (no fluid solve) and
+    # asserts the SBP gauge property that union-∇H inherited from the retired
+    # deltaH readout.  leak_isolation is a pure-analytic ∂H diagnostic.
+    #
+    # The former standalone-solver sections (asym_lagrangian_test and the
+    # _run_sphere / build_pars band-treatment sweep) drove the LEGACY python
+    # eulerian force path on a non-FARMS TwoPhaseSolver.  That path has been
+    # removed (eulerian forces now require the native streaming/BDIMhandler
+    # path), so those sections are retired along with it; the gauge proxy below
+    # is their replacement.
+    ok = kernel_ndelta_gauge()
     leak_isolation()
-    asym_lagrangian_test()
-    pars, m = build_pars(pts_per_D=pts_per_D)
-    g, R, h, rho, V = m["g"], m["R"], m["h"], m["rho"], m["V"]
-    F_arch = rho * g * V
-    print("=" * 70)
-    print("  Band-treatment check: static submerged sphere, buoyancy = rho g V")
-    print(f"  R={R}  grid {m['N']}^3  h={h:.4e}  rho={rho:.0f}")
-    print(f"  EXACT Archimedes F_z = rho g V = {F_arch:+.5f} N")
-    print("=" * 70)
-    solver, umax = _run_sphere(pars, m, n_settle, "eulerian")
-    full, trunc, dH = fz_readouts(solver, h)
-    # the solver's own Lagrangian watertight surface-integral readout (Uhlmann/
-    # Kempe-Frohlich) -- gauge-invariant by Sum(A·n)=0, literature-backed.
-    lag_solver, _ = _run_sphere(pars, m, n_settle, "lagrangian")
-    F_lag = lag_solver.get_loads()
-    lag = float(F_lag[0][0, 2]) if F_lag is not None else float("nan")
-    print(f"  settled |u|max = {umax:.2e} (should be ~0: static hydrostatic)")
-    print()
-    print(f"  {'readout':24s}{'F_z [N]':>12s}{'F_z/F_arch':>12s}")
-    for lbl, val in [("FULL-band n·δ", full),
-                     ("sdf<0-truncated", trunc),
-                     ("partial-Heaviside ∂H", dH),
-                     ("LAGRANGIAN (watertight)", lag)]:
-        print(f"  {lbl:24s}{val:+12.5f}{val / F_arch:12.4f}")
-    print(f"  {'EXACT (Archimedes)':24s}{F_arch:+12.5f}{1.0:12.4f}")
+    if not ok:
+        raise SystemExit("UNION ndelta GAUGE FAILED")
 
 
 if __name__ == "__main__":

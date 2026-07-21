@@ -134,7 +134,7 @@ def _write_sdf(sdf_elem, rel_path):
     """Pretty-print an SDF ElementTree and write it under the sdfs folder."""
     xml_str = minidom.parseString(ET.tostring(sdf_elem)).toprettyxml(indent="  ")
     output_path = os.path.join(
-        lilytorch_repo_root, 'farms_examples', 'sdfs', *rel_path.split('/'))
+        lilytorch_repo_root, 'examples', 'sdfs', *rel_path.split('/'))
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
         f.write(xml_str)
@@ -145,7 +145,8 @@ def _write_sdf(sdf_elem, rel_path):
 
 def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
                     wall_thickness=None, wall_height=0.3, plotting=False,
-                    wall_alpha=None, grid_spacing=None, floor_color=None):
+                    wall_alpha=None, grid_spacing=None, floor_color=None,
+                    lip=None, include_floor=True):
     """Generate a rectangular pool SDF with textured walls and floor.
 
     Parameters
@@ -174,6 +175,13 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
     floor_color : list[float] or None
         RGB colour of the large background ground plane, as ``[r, g, b]``
         in [0, 1].  *None* keeps the default black.
+    lip : float or None
+        Extra height added above *zmax* (3-D) or *wall_height* (2-D) so the
+        walls rise above the water surface.  Defaults to *wall_thickness*.
+        Pass ``0`` when the water fills the entire pool to keep walls flush.
+    include_floor : bool
+        If ``False``, omit the floor box and the background ground plane
+        (open-bottom pool).  Default ``True``.
     """
     is_3d = zmin is not None and zmax is not None
 
@@ -187,7 +195,8 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         wall_thickness = max(wall_thickness, 0.01)
 
     wt = wall_thickness
-    lip = wt                                                      # how much walls rise above water
+    if lip is None:
+        lip = wt                                                # how much walls rise above water
     wz = dz + lip                                                 # wall height
     zc = ((zmin + zmax) / 2 + lip / 2) if is_3d else ((wall_height + lip) / 2)  # wall z-centre
 
@@ -224,16 +233,20 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         _add_box_link(model, name, pose_text, size_text, wall_mat)
 
     # ---- floor (z-min face) ------------------------------------------
-    fz = (zmin - wt / 2) if is_3d else (-wt / 2)
-    _add_box_link(
-        model, 'floor',
-        f'{(xmin+xmax)/2} {(ymin+ymax)/2} {fz} 0 0 0',
-        f'{dx + 2*wt} {dy + 2*wt} {wt}',
-        floor_mat,
-    )
+    if include_floor:
+        fz = (zmin - wt / 2) if is_3d else (-wt / 2)
+        _add_box_link(
+            model, 'floor',
+            f'{(xmin+xmax)/2} {(ymin+ymax)/2} {fz} 0 0 0',
+            f'{dx + 2*wt} {dy + 2*wt} {wt}',
+            floor_mat,
+        )
 
     # ---- large background ground (visual-only, black backdrop) ------
-    ground_bg_z = fz - wt - 0.01
+    if include_floor:
+        ground_bg_z = (zmin - wt / 2) - wt - 0.01 if is_3d else (-wt / 2) - wt - 0.01
+    else:
+        ground_bg_z = -100.0  # push far below when no floor
     if floor_color is not None:
         if isinstance(floor_color, str):
             h = floor_color.lstrip('#')
@@ -257,7 +270,7 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
     # ---- white grid lines over the fluid domain ---------------------
     # Guard against grid_spacing <= 0: 0 (or a negative) would otherwise enter
     # this branch and loop forever since `y += grid_spacing` never advances.
-    if grid_spacing is not None and grid_spacing > 0:
+    if include_floor and grid_spacing is not None and grid_spacing > 0:
         line_w = grid_spacing * 0.003         # line width = 4 % of spacing
         line_h = 0.0002                       # 0.2 mm thick
         # Place grid lines at the INNER floor surface (inside the tank),

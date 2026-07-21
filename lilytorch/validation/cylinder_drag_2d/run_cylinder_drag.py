@@ -22,10 +22,9 @@ from tqdm import tqdm
 # Quick toggles — set these and re-run.
 # Output filenames embed the toggles so different runs don't overwrite.
 # ================================================================
-FORCE_METHOD          = "eulerian"   # "lagrangian" or "eulerian"
-BDIM_MU0_PROJECTION   = True           # True = paper-correct decoupled body cells; False = uniform dt/rho
-ZERO_PRESSURE_INSIDE  = True          # True = wipe p where union sdf<0 before forces (workaround for garbage inside p)
-SOLVER_METHOD         = "python"       # "python" (works standalone) or "kernel" (needs BDIMhandler)
+FORCE_METHOD          = os.environ.get("FORCE_METHOD", "eulerian")   # "lagrangian" or "eulerian"
+BDIM_MU0_PROJECTION   = os.environ.get("BDIM_MU0_PROJECTION", "1") == "1"  # True = paper-correct decoupled body cells; False = uniform dt/rho
+ZERO_PRESSURE_INSIDE  = os.environ.get("ZERO_PRESSURE_INSIDE", "0") == "1"  # True halves the eulerian pressure readout: the delta band needs BOTH sides of the surface (see forces.py note on mu0 masking). Measured pE ratio 0.51 with True.
 
 # ================================================================
 # Physical / geometric parameters
@@ -40,8 +39,8 @@ rho = 1e3                  # density
 # Domain
 xmin, xmax = -0.5, 1.5
 ymin, ymax = -1.0, 1.0
-Nx = 512
-Ny = 512
+Nx = int(os.environ.get("NX", "512"))
+Ny = Nx
 
 # Cylinder centre
 cx, cy = 0.0, 0.0
@@ -74,14 +73,14 @@ print(f"  dt = {dt:.6e},  nt = {nt}")
 print(f"  t_stop = {t_stop:.4f}  ({final_conv_time} convective times)")
 print(f"  Convection method: {convection_method}")
 print(f"  Toggles: force_method={FORCE_METHOD}  bdim_mu0_projection={BDIM_MU0_PROJECTION}  "
-      f"zero_pressure_inside={ZERO_PRESSURE_INSIDE}  solver_method={SOLVER_METHOD}")
+      f"zero_pressure_inside={ZERO_PRESSURE_INSIDE}")
 print(f"  Output: {output_base}")
 print()
 
 # ================================================================
 # Build parameter dict from YAML template
 # ================================================================
-pars = yaml2pyobject("lilytorch/src/configs/flow_past_cylinder.yaml")
+pars = yaml2pyobject("lilytorch/examples/standalone/configs/flow_past_cylinder.yaml")
 
 # --- Domain ---
 pars["solver"]["xmin"] = xmin
@@ -104,7 +103,6 @@ pars["solver"]["nt"]                = nt
 pars["solver"]["force_method"]         = FORCE_METHOD
 pars["solver"]["bdim_mu0_projection"]  = BDIM_MU0_PROJECTION
 pars["solver"]["zero_pressure_inside"] = ZERO_PRESSURE_INSIDE
-pars["solver"]["solver_method"]        = SOLVER_METHOD
 
 # --- Poisson solver ---
 pars["solver"]["poisson_verbose"] = True

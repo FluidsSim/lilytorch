@@ -139,8 +139,10 @@ def build_rigid_circle_fsi(pars, radius, pos0, vel0, mass, f_ext=(0.0, 0.0),
                            accelerator=None, tol=1e-5, max_iter=30):
     """Build a ``FluidSolver`` with an injected free circle + a driver.
 
-    ``pars`` is a solver config dict (as from ``yaml2pyobject``); it should
-    select ``solver_method='python'`` and ``compute_forces`` is forced on.
+    ``pars`` is a solver config dict (as from ``yaml2pyobject``);
+    ``compute_forces`` is forced on.  The injected ``SingleBodyComposite``
+    publishes the solver's body-field contract, so it runs through the
+    fused fluid step like any python-style provider.
     Returns ``(driver, coupling, fluid_solver)``.
     """
     from lilytorch.src.solver import FluidSolver

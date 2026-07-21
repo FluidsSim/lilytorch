@@ -7,7 +7,33 @@ All functions are standalone — they take explicit grid parameters
 (h, ndim, dx, dy, dz) instead of relying on ``self``.
 """
 
+from __future__ import annotations
+
 import torch
+
+from lilytorch.src import native
+
+
+# ------------------------------------------------------------------
+#  Strain-rate magnitude — native CUDA / C++ kernel
+# ------------------------------------------------------------------
+# |S̄| is recomputed every step for the Smagorinsky / Carreau viscosity
+# fields, so the result lands in a buffer reused across calls with the same
+# shape/dtype/device instead of a fresh allocation.
+_smag_persist: torch.Tensor | None = None
+
+
+def _strain_rate_magnitude_native(u_t, v_t, w_t, h):
+    """Native |S̄| into a persistent full-grid buffer shaped like ``u_t``."""
+    global _smag_persist
+    if (_smag_persist is None
+            or _smag_persist.shape != u_t.shape
+            or _smag_persist.dtype != u_t.dtype
+            or _smag_persist.device != u_t.device):
+        _smag_persist = torch.empty_like(u_t)
+
+    native.strain_rate_magnitude(u_t, v_t, w_t, float(h), _smag_persist)
+    return _smag_persist
 
 
 # ------------------------------------------------------------------
@@ -201,27 +227,13 @@ def vorticity_components(u, v, w, h):
 # ------------------------------------------------------------------
 # Strain-rate magnitude and Smagorinsky eddy viscosity
 # ------------------------------------------------------------------
-def _stag_to_cc(t, dim):
-    """Average stagger-face field to cell centres along *dim*.
-
-    On a MAC grid ``t`` is sampled at face positions `(i − ½)·h` in the
-    given dimension.  The adjacent-pair mean `½·(t[i] + t[i+1])` lands
-    exactly on the cell-centre `i·h`.  The result has one fewer element in
-    *dim*; a Neumann (replicate-edge) pad restores the original shape so
-    the caller doesn't need to handle different sizes.
-    """
-    lo = [slice(None)] * t.ndim
-    hi = [slice(None)] * t.ndim
-    lo[dim] = slice(None, -1)
-    hi[dim] = slice(1, None)
-    mid = 0.5 * (t[tuple(lo)] + t[tuple(hi)])
-    last = [slice(None)] * t.ndim
-    last[dim] = slice(-1, None)
-    return torch.cat([mid, mid[tuple(last)]], dim=dim)
-
 
 def strain_rate_magnitude(vel, h, ndim):
-    """Compute ``|S̄|`` = sqrt(2 * S_ij * S_ij) on the cell-centred grid.
+    """Compute ``|S̄|`` = sqrt(2 * S_ij * S_ij) — native CUDA / C++ kernel.
+
+    Reproduces the legacy ``torch.gradient(edge_order=2) + _stag_to_cc`` path
+    exactly, but keeps every gradient in registers instead of materialising 4
+    (2-D) / 9 (3-D) full-grid temporaries.
 
     Parameters
     ----------
@@ -231,47 +243,15 @@ def strain_rate_magnitude(vel, h, ndim):
 
     Returns
     -------
-    ``|S̄|`` tensor with same shape as vel[0].  Ghost cells are zero.
+    ``|S̄|`` tensor with same shape as vel[0], backed by a persistent
+    buffer (no per-step allocation).
     """
     if ndim == 2:
         u, v = vel
-        dudx = torch.gradient(u, spacing=h, dim=0, edge_order=2)[0]
-        dudy = torch.gradient(u, spacing=h, dim=1, edge_order=2)[0]
-        dvdx = torch.gradient(v, spacing=h, dim=0, edge_order=2)[0]
-        dvdy = torch.gradient(v, spacing=h, dim=1, edge_order=2)[0]
-        # Cross derivatives are at different stagger locations (dudy at
-        # x-faces, dvdx at y-faces).  Average each to cell centres before
-        # combining into S12 = 0.5*(dudy + dvdx).
-        dudy = _stag_to_cc(dudy, dim=0)   # x-face → CC
-        dvdx = _stag_to_cc(dvdx, dim=1)   # y-face → CC
-        # S_ij S_ij = S11² + S22² + 2*S12²
-        # S11 = dudx, S22 = dvdy, S12 = 0.5*(dudy + dvdx)
-        S2 = dudx**2 + dvdy**2 + 0.5 * (dudy + dvdx)**2
-        return torch.sqrt(2.0 * S2)
+        return _strain_rate_magnitude_native(u, v, None, h)
     else:
         u, v, w = vel
-        dudx = torch.gradient(u, spacing=h, dim=0, edge_order=2)[0]
-        dudy = torch.gradient(u, spacing=h, dim=1, edge_order=2)[0]
-        dudz = torch.gradient(u, spacing=h, dim=2, edge_order=2)[0]
-        dvdx = torch.gradient(v, spacing=h, dim=0, edge_order=2)[0]
-        dvdy = torch.gradient(v, spacing=h, dim=1, edge_order=2)[0]
-        dvdz = torch.gradient(v, spacing=h, dim=2, edge_order=2)[0]
-        dwdx = torch.gradient(w, spacing=h, dim=0, edge_order=2)[0]
-        dwdy = torch.gradient(w, spacing=h, dim=1, edge_order=2)[0]
-        dwdz = torch.gradient(w, spacing=h, dim=2, edge_order=2)[0]
-        # Average each cross-derivative to cell centres before combining.
-        dudy = _stag_to_cc(dudy, dim=0)   # x-face → CC in x
-        dvdx = _stag_to_cc(dvdx, dim=1)   # y-face → CC in y
-        dudz = _stag_to_cc(dudz, dim=0)   # x-face → CC in x
-        dwdx = _stag_to_cc(dwdx, dim=2)   # z-face → CC in z
-        dvdz = _stag_to_cc(dvdz, dim=1)   # y-face → CC in y
-        dwdy = _stag_to_cc(dwdy, dim=2)   # z-face → CC in z
-        # S_ij S_ij = S11² + S22² + S33² + 2*(S12² + S13² + S23²)
-        S2 = (dudx**2 + dvdy**2 + dwdz**2
-              + 0.5 * (dudy + dvdx)**2
-              + 0.5 * (dudz + dwdx)**2
-              + 0.5 * (dvdz + dwdy)**2)
-        return torch.sqrt(2.0 * S2)
+        return _strain_rate_magnitude_native(u, v, w, h)
 
 
 def smagorinsky_viscosity(vel, h, ndim, cs=0.1):

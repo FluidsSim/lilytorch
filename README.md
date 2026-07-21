@@ -232,7 +232,7 @@ documentation for the theory and equations, and
 | `yaml_operations.py` | YAML read/write helpers. |
 | `paths.py` | Canonical path constants for the repository. |
 
-### Example Simulations (`lilytorch/farms_examples/`)
+### Example Simulations (`lilytorch/examples/`)
 
 | Directory | Description |
 |---|---|

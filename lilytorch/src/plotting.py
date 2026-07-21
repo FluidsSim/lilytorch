@@ -1394,7 +1394,12 @@ class PlottingMixin:
             if hasattr(self.composite_body, "com_pos"):
                     terminate = not self.inside(self.composite_body.com_pos)
                     if terminate:
-                        logger.warning("Termination condition met: body exited domain")
+                        logger.warning(
+                            "Termination condition met: body exited domain "
+                            "(com_pos=%s, domain x=[%s, %s] y=[%s, %s])",
+                            self.composite_body.com_pos.tolist(),
+                            self.xmin, self.xmax, self.ymin, self.ymax,
+                        )
             else:
                 terminate = False
         return terminate

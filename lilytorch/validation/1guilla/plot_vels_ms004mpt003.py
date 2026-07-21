@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 plt.rcParams['font.size'] = '20'
 
 
-RUN_DIR = os.path.join(save_path, "2026-06-23T10:32:14.843214")
+RUN_DIR = os.path.join(save_path, "2026-07-21T12:22:02.060895")
 # RUN_DIR = os.path.join(save_path, "1guilla_surface/2026-06-18T14:35:00.741808")
 
 # RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T16:48:32.413301")

@@ -24,21 +24,9 @@ Sign / value convention::
 import torch
 
 from lilytorch.src.advection import _sl
-
-
-_CVOF_KERNEL_OK = None
-
-
-def _cvof_kernel_available():
-    """True if the native ``cvof_sweep`` op is registered (extension built
-    against this runtime).  Cached after the first probe."""
-    global _CVOF_KERNEL_OK
-    if _CVOF_KERNEL_OK is None:
-        try:
-            _CVOF_KERNEL_OK = torch.ops.lilytorch_kernels.cvof_sweep is not None
-        except (AttributeError, RuntimeError):
-            _CVOF_KERNEL_OK = False
-    return _CVOF_KERNEL_OK
+# Native cvof_sweep: CUDA kernel + CPU twin (multigrid_cpu.cpp), bit-exact vs
+# the sole production path (CUDA kernel + at::parallel_for CPU twin).
+from lilytorch.src.native import cvof_sweep as _native_cvof_sweep
 
 
 def _neumann_pad(q):
@@ -211,81 +199,55 @@ class TwoPhase:
         _neumann_pad(a)
         self.alpha = a
 
-    def _shift(self, a, s, d):
-        """Shift ``a`` by ``s`` cells along dim ``d`` with **edge replication**
-        (Neumann-consistent), unlike ``torch.roll`` which wraps the boundary.
-        Supports ``s in (1, 2, -1)`` (the cVOF stencil offsets)."""
-        nd = self.ndim
-        S  = lambda sl: _sl(nd, d, sl)
-        if s == 1:                       # a[k-1], boundary -> a[0]
-            return torch.cat([a[S(slice(0, 1))], a[S(slice(0, -1))]], dim=d)
-        if s == 2:                       # a[k-2], boundary -> a[0]
-            return torch.cat([a[S(slice(0, 1))], a[S(slice(0, 1))],
-                              a[S(slice(0, -2))]], dim=d)
-        if s == -1:                      # a[k+1], boundary -> a[-1]
-            return torch.cat([a[S(slice(1, None))], a[S(slice(-1, None))]], dim=d)
-        raise ValueError(f"_shift: unsupported offset {s}")
-
     def _cvof_sweep(self, a, u_d, d, dt):
         """One Weymouth-Yue conservative directional sweep along dim ``d``.
 
-        Dispatches to the fused CUDA kernel (:func:`torch.ops.lilytorch_kernels.cvof_sweep`,
-        MP10 / T2d) when ``a`` is on CUDA and the native extension is built —
-        a single launch replacing the ~8 full-grid temporaries (the three
-        edge-clamped shifts, two limited slopes, two donor faces, the flux
-        tensor) of the pure-PyTorch path below.  Falls back to
-        :meth:`_cvof_sweep_python` (the bit-for-bit reference / CPU path)
-        otherwise.
+        Runs the native ``cvof_sweep`` op (CUDA kernel / CPU twin).  The
+        pure-PyTorch reference is kept as the independent parity oracle in
+        ``tests/test_two_phase.py``.
         """
-        if a.is_cuda and _cvof_kernel_available():
-            out = a.clone()
-            torch.ops.lilytorch_kernels.cvof_sweep(
-                a, u_d, float(dt) / self.h, d, out,
-            )
-            return out
-        return self._cvof_sweep_python(a, u_d, d, dt)
-
-    def _cvof_sweep_python(self, a, u_d, d, dt):
-        """Pure-PyTorch reference for one W&Y conservative sweep along ``d``.
-
-        MAC convention: ``u_d[k]`` is the face *left* of cell ``k`` (between
-        cells ``k-1`` and ``k``).  The face value is the W&Y 2nd-order
-        Courant-corrected, van-Leer-limited extrapolation of the **donor**
-        cell to the face (first-order upwind when the slope limiter kills the
-        gradient), plus the divergence correction.  Returns a new tensor with
-        the interior updated.  Kept as the parity oracle for the CUDA kernel.
-        """
-        nd  = self.ndim
-        S   = lambda s: _sl(nd, d, s)
-        cfl = dt / self.h
-        C   = u_d * cfl                                   # face Courant number
-        # neighbour shifts along d with EDGE-CLAMP (Neumann-consistent), NOT
-        # torch.roll: roll wraps top<->bottom / left<->right, which corrupts the
-        # face values at the domain corners in an order-dependent way and shows
-        # up as a one-corner asymmetry in an otherwise symmetric problem.
-        a_m1 = self._shift(a,  1, d)                      # a[k-1]
-        a_m2 = self._shift(a,  2, d)                      # a[k-2]
-        a_p1 = self._shift(a, -1, d)                      # a[k+1]
-
-        def _vleer(db, df):
-            # van Leer (harmonic) limited slope; 0 at extrema / sign changes.
-            denom = torch.where(db + df == 0.0,
-                                torch.ones_like(db), db + df)
-            s = 2.0 * db * df / denom
-            return torch.where(db * df > 0.0, s, torch.zeros_like(s))
-
-        # C >= 0: donor = cell k-1, extrapolate forward to the face
-        s_pos    = _vleer(a_m1 - a_m2, a - a_m1)
-        face_pos = a_m1 + 0.5 * (1.0 - C) * s_pos
-        # C < 0: donor = cell k, extrapolate backward to the face
-        s_neg    = _vleer(a - a_m1, a_p1 - a)
-        face_neg = a - 0.5 * (1.0 + C) * s_neg
-        F = u_d * torch.where(C >= 0.0, face_pos, face_neg)   # flux at face k
         out = a.clone()
-        FL = F[S(slice(1, -1))]        # left face of interior cell i  (index i)
-        FR = F[S(slice(2, None))]      # right face of interior cell i (index i+1)
-        uL = u_d[S(slice(1, -1))]
-        uR = u_d[S(slice(2, None))]
-        ai = a[S(slice(1, -1))]
-        out[S(slice(1, -1))] = ai + cfl * (FL - FR + ai * (uR - uL))
+        _native_cvof_sweep(a, u_d, float(dt) / self.h, d, out)
         return out
+
+    def advect_graph_aware(self, *vels, dt):
+        """Graph-capturable VOF transport (same physics as :meth:`advect`).
+
+        Identical to :meth:`advect` but uses persistent double-buffered
+        intermediate tensors instead of per-sweep ``clone()`` allocations,
+        so the entire directional-split sequence is a single static-shape
+        region suitable for ``torch.cuda.CUDAGraph`` capture.
+
+        The sweep parity (alternating order) is read from ``self._sweep_parity``
+        at call time.  The CALLER is responsible for toggling it AFTER the
+        graph key is computed (so each parity variant gets its own captured
+        graph).  This method does NOT toggle the parity itself — inside a
+        graph replay, Python attribute writes do not execute.
+        """
+        dt = float(dt)
+        order = list(range(self.ndim))
+        if getattr(self, "_sweep_parity", False):
+            order = order[::-1]
+
+        # Lazily allocate the persistent intermediate: the sweeps ping-pong
+        # between ``alpha`` and this one scratch buffer.
+        shape = self.alpha.shape
+        if (getattr(self, "_cvof_buf_a", None) is None
+                or self._cvof_buf_a.shape != shape):
+            self._cvof_buf_a = torch.empty(
+                shape, dtype=self.alpha.dtype, device=self.alpha.device)
+
+        # Double-buffer: read from src, write to dst, then swap
+        src = self.alpha
+        dst = self._cvof_buf_a
+        for d in order:
+            _neumann_pad(src)
+            dst.copy_(src)  # persistent clone
+            _native_cvof_sweep(src, vels[d], float(dt) / self.h, d, dst)
+            src, dst = dst, src  # swap: output becomes next input
+        _neumann_pad(src)
+
+        # Final result may be in either buffer; copy back to alpha if needed
+        if src is not self.alpha:
+            self.alpha.copy_(src)
+

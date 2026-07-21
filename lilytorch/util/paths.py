@@ -4,8 +4,8 @@ import lilytorch
 import datetime
 
 lilytorch_repo_root = os.path.join(os.path.dirname(os.path.dirname(lilytorch.__file__)), "lilytorch")
-farms_examples_path = os.path.join(lilytorch_repo_root, "farms_examples")
-sdfs_path           = os.path.join(farms_examples_path, "sdfs")
+examples_path = os.path.join(lilytorch_repo_root, "examples")
+sdfs_path           = os.path.join(examples_path, "sdfs")
 save_path           = "/data/andreaferrario/ns_data/"
 
 def gen_new_folder(stack_folder=""):
@@ -18,7 +18,7 @@ def gen_new_folder(stack_folder=""):
 
 __all__ = [
     'lilytorch_repo_root',
-    'farms_examples_path',
+    'examples_path',
     'sdfs_path',
     'gen_new_folder',
     'save_path',

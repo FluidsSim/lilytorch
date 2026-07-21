@@ -1,174 +1,39 @@
 """Dimension-agnostic advection for MAC staggered grids + the AdvDiffSolver.
 
 Split out of the former monolithic ``adv_diff.py`` (since removed).  This
-module owns:
+module owns the :class:`AdvDiffSolver` orchestrator: BCs, scheme dispatch and
+semi-Lagrangian transport.
 
-* the pluggable convective **scheme functions** (QUICK, ADBQUICKEST, CUBISTA,
-  van Leer, CDS) — pure ``f(upstream, center, downstream)`` kernels;
-* the location-agnostic **flux assembler** :func:`_flux`;
-* **momentum** advection (:func:`advect_momentum`, the MAC self/cross-advection
-  used by the Navier–Stokes predictor);
-* **scalar** advection (:func:`advect_scalar`) for a cell-centred passive
-  scalar (e.g. the free-surface level set) — reuses the same schemes/flux;
-* the :class:`AdvDiffSolver` orchestrator (BCs + scheme dispatch +
-  semi-Lagrangian), which composes :mod:`lilytorch.src.diffusion` for the
-  diffusion term so advection and diffusion stay independently testable and
-  ``torch.compile``-able.
+Every kernel it drives is a native CUDA / C++ op from :mod:`lilytorch.src.native`
+— ``advect_flux_accumulate`` (all five high-order convective schemes: QUICK,
+ADBQUICKEST, CUBISTA, van Leer, CDS; 2-D and 3-D; f32+f64), ``sl_advect_{2,3}d``,
+``diffuse_add`` and ``apply_bcs_{2,3}d`` — each with a CPU twin, so the same path
+runs on CPU and CUDA.
 
-Dependency rule: this module imports :mod:`diffusion` (a leaf) but **never**
-imports ``solver`` or ``two_phase``.  The two-phase model depends on this
-module (it reuses ``advect_scalar`` for VOF transport), not the other way round.
+Dependency rule: this module imports the leaf kernel modules (``native``,
+``interpolation``) but **never** imports ``solver`` or ``two_phase``.
+``two_phase`` reuses the ``_sl`` slicing helper.
 
 Works identically in 2-D ``(x, y)`` and 3-D ``(x, y, z)`` by looping over
 spatial dimensions rather than duplicating code per axis -- inspired by
 WaterLily.jl.
 """
+from __future__ import annotations
 
 import torch
-from lilytorch.src.kernels import RegularGridInterpolatorAutomatic
-from lilytorch.src.kernels import _C as _lilytorch_kernels_C  # noqa: F401  -- registers torch.ops.lilytorch_kernels.*
+# This module must never import ``solver`` or ``two_phase`` (it sits
+# upstream of them in the import graph).
+from lilytorch.src.native import RegularGridInterpolator
 
-from lilytorch.src import diffusion
+from lilytorch.src import native
 
-
-
-# =====================================================================
-# Convective scheme functions:  f(upstream, center, downstream)
-# =====================================================================
-#
-# Convention -- face between cell L (left) and cell R (right):
-#   positive flow (L->R):
-#       upstream   = f[L-1]   (far upstream)
-#       center     = f[L]     (upwind cell)
-#       downstream = f[R]     (downwind cell)
-#   negative flow (R->L):
-#       upstream   = f[R+1]
-#       center     = f[R]
-#       downstream = f[L]
-
-def median(a, b, c):
-    """Element-wise median of three tensors."""
-    return torch.maximum(
-        torch.minimum(a, b),
-        torch.minimum(torch.maximum(a, b), c),
-    )
+# apply_bcs_{2,3}d (used by AdvDiffSolver.set_BCs) is a native CUDA / C++ op
+# with a CPU twin; see the descriptor caches built in this
+# module — merged from the former misc_2d.py / misc_3d.py.
 
 
-def quick(u, c, d):
-    """QUICK scheme -- 3rd-order.
 
-    Uses in-place operations to keep simultaneous intermediate tensors at 3
-    (vs. the 5-6 created by the original nested ``median`` calls), cutting
-    the peak transient allocation roughly in half at large grid sizes.
-    """
-    # inner_median = median(10*c - 9*u, c, d)
-    t  = 10.0 * c - 9.0 * u       # owned temp #1
-    lo = torch.minimum(t, c)       # owned temp #2  (= min(t, c))
-    torch.maximum(t, c, out=t)     # t = max(t, c), in-place
-    torch.minimum(t, d, out=t)     # t = min(max(t, c), d), in-place
-    torch.maximum(lo, t, out=lo)   # lo = median(10c-9u, c, d)
-    del t                          # free; lo holds inner_median
-
-    # outer = (5*c + 2*d - u) / 6
-    outer = 5.0 * c
-    outer.add_(d, alpha=2.0)       # in-place: 5c + 2d
-    outer.add_(u, alpha=-1.0)      # in-place: 5c + 2d - u
-    outer.div_(6.0)                # in-place: / 6
-
-    # result = median(outer, c, lo)  -- lo is inner_median
-    # Peak: lo + outer + lo2 = 3 tensors
-    lo2 = torch.minimum(outer, c)
-    torch.maximum(outer, c, out=outer)
-    torch.minimum(outer, lo, out=outer)
-    torch.maximum(lo2, outer, out=lo2)
-    del outer, lo
-    return lo2
-
-
-def van_leer(u, c, d):
-    """Van Leer flux limiter -- 2nd-order TVD."""
-    denom = d - c
-    rf = (c - u) / (denom + 1e-30)
-    psi = (rf + rf.abs()) / (1.0 + rf.abs())
-    # T1a: inline the TVD face value ``c + 0.5*(d-c)*psi`` in-place on the
-    # owned ``psi``, reusing the already-live ``denom == d-c`` instead of
-    # re-materialising it.  Ordering (×0.5 first) is bit-exact: ×0.5 is an
-    # exact power-of-two scale, so this is a single rounding of the same real
-    # product, and the final add is commutative in IEEE-754.
-    psi.mul_(0.5).mul_(denom).add_(c)
-    return torch.where(denom.abs() < 1e-30, c, psi)
-
-
-def cds(u, c, d):
-    """Central difference scheme -- 2nd-order, not TVD."""
-    return 0.5 * (c + d)
-
-
-def abdquickest(u, c, d, C=0.1):
-    """ADBQUICKEST scheme -- 3rd-order TVD, Courant-number dependent.
-
-    Refactored to keep peak simultaneous tensor count at 4 (was 5) by
-    replacing ``torch.full_like(rf, C_upper)`` with a scalar clamp and
-    sequencing A / B so only one extra tensor beyond {denom, rf, psi} is
-    live at the peak moment.  Saves ~1 full-grid tensor (~0.5 GiB at 512³).
-    """
-    C2      = C * C
-    C_upper = 2.0 * (1.0 - C)                             # scalar
-
-    denom = d - c                                          # owned temp #1
-    rf    = (c - u) / (denom + 1e-30)                     # owned temp #2
-
-    # Compute psi = clamp(min(A, B, C_upper), 0)
-    #   A = C_upper * rf
-    #   B = [(2+C2-3C) + (1-C2)*rf] / (3-3C)
-    # Order: B → scalar-clamp at C_upper → min with A → scalar-clamp at 0
-    # Peak: denom + rf + psi + A_temp = 4 tensors (vs 5 in the original).
-    _scale  = (1.0 - C2) / (3.0 - 3.0 * C)
-    _offset = (2.0 + C2 - 3.0 * C) / (3.0 - 3.0 * C)
-    psi  = rf * _scale                                     # owned temp #3
-    psi += _offset                                         # in-place: psi = B
-    psi.clamp_(max=C_upper)                                # in-place: min(B, C_upper)
-    torch.minimum(psi, rf * C_upper, out=psi)              # rf*C_upper = temp #4 (brief)
-    del rf
-    psi.clamp_(min=0.0)
-
-    # T1a: inline ``c + 0.5*(d-c)*psi`` in-place on the owned ``psi``,
-    # reusing the live ``denom`` (bit-exact — see van_leer).
-    psi.mul_(0.5).mul_(denom).add_(c)
-    return torch.where(denom.abs() < 1e-30, c, psi)
-
-
-def cubista(u, c, d):
-    """CUBISTA scheme -- 2nd-order TVD (Alves, Oliveira & Pinho, 2003).
-
-    Same tensor-sequencing improvement as ``abdquickest``: scalar clamp
-    replaces ``torch.full_like(rf, 1.5)`` to avoid a 5th simultaneous
-    tensor at the peak moment.
-    """
-    denom = d - c
-    rf    = (c - u) / (denom + 1e-30)
-
-    psi  = 0.75 * rf                                       # owned temp
-    psi += 0.25                                            # in-place: 0.75*rf + 0.25
-    psi.clamp_(max=1.5)                                    # in-place: min(0.75*rf+0.25, 1.5)
-    torch.minimum(psi, rf * 1.5, out=psi)                  # min with 1.5*rf (brief temp)
-    del rf
-    psi.clamp_(min=0.0)
-
-    # T1a: inline ``c + 0.5*(d-c)*psi`` in-place on the owned ``psi``,
-    # reusing the live ``denom`` (bit-exact — see van_leer).
-    psi.mul_(0.5).mul_(denom).add_(c)
-    return torch.where(denom.abs() < 1e-30, c, psi)
-
-
-# Scheme registry — shared by AdvDiffSolver and the free-surface level set.
-SCHEMES = {
-    "quick": quick, "abdquickest": abdquickest,
-    "vanLeer": van_leer, "van_leer": van_leer,
-    "cds": cds, "cubista": cubista,
-}
-
-# Scheme IDs for the fused CUDA ``advect_flux_add`` kernel (T2a).
+# Scheme IDs for the fused ``advect_flux_accumulate`` kernel (13c).
 # Must match the compile-time enum in advection_flux.cu.
 _CUDA_SCHEME_IDS: dict[str, int] = {
     "quick": 0,
@@ -194,58 +59,6 @@ def _sl(ndim, dim, s):
 def _inner(ndim):
     """Index tuple selecting interior cells: [1:-1] on every dimension."""
     return tuple(slice(1, -1) for _ in range(ndim))
-
-
-# =====================================================================
-# Flux computation  (dimension-agnostic, scheme-parameterised)
-# =====================================================================
-
-def _flux(scheme, fv, p, dim):
-    """Scheme-weighted flux along dimension *dim*.
-
-    Location-agnostic: works for staggered momentum components and for
-    cell-centred scalars alike — it only needs a face-velocity array and a
-    field array of compatible shapes.
-
-    Parameters
-    ----------
-    scheme : callable ``f(upstream, center, downstream)`` — one of the
-             scheme functions above.
-    fv     : face velocities  (``n[dim]-1`` on *dim*, interior on others).
-    p      : field values      (``n[dim]``   on *dim*, interior on others).
-    """
-    lam = scheme
-    D   = dim
-    S   = lambda s: _sl(p.ndim, D, s)
-
-    # interior faces (full 3-point stencil available)
-    # Compute B1 and B2 as separate named tensors so cond, B1, B2 can
-    # be freed immediately after torch.where, reducing the live-tensor
-    # count at the torch.cat step.
-    fv_in = fv[S(slice(1, -1))]
-    cond  = fv_in > 0
-    B1    = fv_in * lam(p[S(slice(None, -3))], p[S(slice(1, -2))], p[S(slice(2, -1))])
-    B2    = fv_in * lam(p[S(slice(3, None))],  p[S(slice(2, -1))], p[S(slice(1, -2))])
-    flux_in = torch.where(cond, B1, B2)
-    del cond, B1, B2
-
-    # lo boundary face — CDS fallback for positive flow
-    fv_lo = fv[S(slice(0, 1))]
-    flux_lo = torch.where(
-        fv_lo > 0,
-        fv_lo * 0.5 * (p[S(slice(0, 1))] + p[S(slice(1, 2))]),
-        fv_lo * lam(p[S(slice(2, 3))], p[S(slice(1, 2))], p[S(slice(0, 1))]),
-    )
-
-    # hi boundary face — CDS fallback for negative flow
-    fv_hi = fv[S(slice(-1, None))]
-    flux_hi = torch.where(
-        fv_hi > 0,
-        fv_hi * lam(p[S(slice(-3, -2))], p[S(slice(-2, -1))], p[S(slice(-1, None))]),
-        fv_hi * 0.5 * (p[S(slice(-2, -1))] + p[S(slice(-1, None))]),
-    )
-
-    return torch.cat([flux_lo, flux_in, flux_hi], dim=D)
 
 
 # =====================================================================
@@ -305,72 +118,6 @@ def _scalar_face_vel(vd, d, ndim):
 
 
 # =====================================================================
-# Advection update kernels  (forward-Euler, conservative flux form)
-# =====================================================================
-
-def advect_momentum(scheme, vel, dt_dh, ndim, accum=None):
-    """Convective increment for each MAC momentum component (no diffusion).
-
-    Returns a tuple of per-component interior increments ``rhs_i`` such that
-    ``vel_new[i][inner] = vel[i][inner] + rhs_i``.  If *accum* is provided it
-    must be a list of per-component starting tensors (e.g. the diffusion
-    increment) that the convective fluxes are added into **in place**; this
-    preserves the original fused advection+diffusion memory behaviour.
-    """
-    inner = _inner(ndim)
-    out = []
-    for i in range(ndim):
-        rhs = accum[i] if accum is not None else torch.zeros_like(vel[i][inner])
-        for d in range(ndim):
-            fv = _face_vel(vel, i, d, ndim)
-            p  = _field_for_flux(vel[i], d, ndim)
-            F  = _flux(scheme, fv, p, d)
-            # In-place accumulation: rhs += dt_dh * (F[:-1] - F[1:]).
-            F_diff = (F[_sl(ndim, d, slice(None, -1))]
-                      - F[_sl(ndim, d, slice(1, None))])
-            rhs.add_(F_diff, alpha=float(dt_dh[d]))
-            del fv, F, F_diff  # free before next d-iteration to avoid stacking
-        out.append(rhs)
-    return tuple(out)
-
-
-def advect_scalar(phi, *vel, scheme, dt, dh):
-    """Forward-Euler advection of a cell-centred scalar by a MAC velocity.
-
-        phi^{n+1} = phi^n - dt * div(vel ⊗ phi)
-
-    Conservative flux form; for a divergence-free ``vel`` this equals the
-    advective form ``vel·∇phi``.  Reuses the same scheme/flux machinery as
-    the momentum path via :func:`_flux` and :func:`_scalar_face_vel`.
-
-    Parameters
-    ----------
-    phi    : cell-centred scalar (interior + ghost cells).
-    *vel   : MAC velocity components ``(u, v[, w])``, same shape as ``phi``.
-    scheme : callable convective scheme (e.g. :func:`quick`).
-    dt     : float time step.
-    dh     : list of floats — grid spacing per dimension.
-
-    Returns a new tensor (ghost cells copied from ``phi``; the caller is
-    expected to re-apply its scalar BC / ghost padding afterwards).
-    """
-    ndim  = phi.ndim
-    inner = _inner(ndim)
-    rhs   = torch.zeros_like(phi[inner])
-    for d in range(ndim):
-        fv = _scalar_face_vel(vel[d], d, ndim)
-        p  = _field_for_flux(phi, d, ndim)
-        F  = _flux(scheme, fv, p, d)
-        F_diff = (F[_sl(ndim, d, slice(None, -1))]
-                  - F[_sl(ndim, d, slice(1, None))])
-        rhs.add_(F_diff, alpha=float(dt) / float(dh[d]))
-        del fv, F, F_diff
-    out = phi.clone()
-    out[inner] += rhs
-    return out
-
-
-# =====================================================================
 # Advection-diffusion solver
 # =====================================================================
 class AdvDiffSolver:
@@ -393,8 +140,9 @@ class AdvDiffSolver:
 
         u^{n+1} = u^n + dt * [-div(vel (x) u) + nu * laplacian(u)]
 
-    The convective fluxes come from :func:`advect_momentum` and the
-    diffusion term from :mod:`lilytorch.src.diffusion`, composed here.
+    The convective fluxes come from the fused ``native.advect_flux_accumulate``
+    kernel and the diffusion term from ``native.diffuse_add``,
+    composed here.
     """
 
     # -- construction ---------------------------------------------------
@@ -429,6 +177,10 @@ class AdvDiffSolver:
         self.dtype  = x.dtype
         self.dt     = float(dt)   # ensure Python float so _dt_dh never holds tensors
         self.nu     = nu
+        # Pre-convert nu to Python float (avoids GPU→CPU .item() sync in
+        # diffuse_add_ hot path, which would trigger CUDA error
+        # 900 during whole-step CUDA-graph capture).
+        self._nu_float = float(nu)
 
         # ---- dimension-agnostic grid setup ----------------------------
         self.coords = [x, y] if z is None else [x, y, z]
@@ -501,27 +253,39 @@ class AdvDiffSolver:
             self._bc_fused_2d_packed = self._pack_bc_descriptors_3d()
 
         # ---- method dispatch -----------------------------------------
-        if method in SCHEMES:
-            self._scheme      = SCHEMES[method]
-            self._scheme_name = method        # used by _get_step_scheme
+        # Flux schemes all run through the single fused native
+        # ``advect_flux_accumulate`` kernel (CPU + CUDA); the
+        # semi-Lagrangian / implicit solves are a separate ``solve`` method.
+        # ``graph_capturable``: may the caller record ``solve`` into a
+        # ``torch.cuda.CUDAGraph``?  ONLY if every kernel it launches goes to
+        # torch's current CUDA stream, i.e. the native extension ops.  A kernel
+        # launched on any other stream is silently DROPPED from every replay.
+        # Both paths are native end-to-end (flux: torch ``copy_`` +
+        # ``native.diffuse_add`` + ``native.advect_flux_accumulate``;
+        # semi-Lagrangian: ``native.sl_advect_*`` + ``native.diffuse_add``),
+        # so both are safe to capture.
+        if method in _CUDA_SCHEME_IDS:
+            self._scheme_name = method
             self.solve        = self._solve_convective
+            self.graph_capturable = True
         elif method in ("semi-lagrangian", "implicit"):
             self._scheme_name = method
             self._init_semi_lagrangian()
             self.solve = self._solve_semi_lagrangian
+            self.graph_capturable = True
         else:
             raise ValueError(
                 f"Unknown convection method '{method}'. Choose from: "
-                f"{sorted(set(list(SCHEMES.keys()) + ['semi-lagrangian', 'implicit']))}"
+                f"{sorted(list(_CUDA_SCHEME_IDS.keys()) + ['semi-lagrangian', 'implicit'])}"
             )
 
-        # Multi-stream dispatch: set True externally (e.g. from FluidSolver)
-        # when device is CUDA.  Lazy-initialised per-component streams stored
-        # in _adv_streams; None until first use.
-        _dev = device if isinstance(device, torch.device) else torch.device(device)
-        self._is_cuda     = _dev.type == "cuda"
-        self._use_streams = False
-        self._adv_streams = None
+        # ---- persistent buffers for convective solve (Phase 2) --------
+        # _conv_copy[i]: full-grid copy buffer for vel[i] (flux stencil source)
+        # _conv_out[i]:  full-grid output buffer (dst = vel[i] + diff + flux)
+        # _diff_copy[i]: full-grid double-buffer for native.diffuse_add
+        self._conv_copy = None
+        self._conv_out = None
+        self._diff_copy = None
 
         print(f"Using the {method} method for the adv-diff equation ({self.ndim}D)")
 
@@ -534,60 +298,60 @@ class AdvDiffSolver:
 
         self._interps     = []
         self._flat_coords = []
+        self._sl_axes_1d  = []   # per-comp tuple of 1-D axis tensors
+        self._sl_out      = None # persistent fused-kernel output buffers
+        self._diff_out    = None # persistent full-grid copy buffers (double-buffer diffusion)
 
         for i in range(ndim):
             # component-i lives on a grid staggered in dim i only
             grid = tuple(stag[d] if d == i else self.coords[d]
                          for d in range(ndim))
-            interp = RegularGridInterpolatorAutomatic(
+            interp = RegularGridInterpolator(
                 grid,
                 torch.zeros(tuple(self.n), device=self.device, dtype=self.dtype),
                 fill_value=None, method="quadratic",
             )
             self._interps.append(interp)
+            self._sl_axes_1d.append(tuple(g.contiguous() for g in grid))
 
             grids = torch.meshgrid(*grid, indexing="ij")
             self._flat_coords.append(
                 [g.flatten().clone().detach() for g in grids]
             )
 
+    # -----------------------------------------------------------------
+    # Convective-scheme persistent buffers  (Phase 2 double-buffer pattern)
+    # -----------------------------------------------------------------
+    def _init_convective_buffers(self, *vel):
+        """Ensure persistent buffers exist for each velocity component
+        (full-grid, same shape/dtype/device as *vel*).
+
+        Called once on first solve; reallocated transparently if the
+        signature changes (grid growth / dtype / device switch).
+        """
+        ndim = len(vel)
+        dev = vel[0].device
+        dtype = vel[0].dtype
+
+        def _bufs_ok(bufs):
+            return (bufs is not None
+                    and len(bufs) == ndim
+                    and all(b.shape == v.shape and b.dtype == dtype and b.device == dev
+                           for b, v in zip(bufs, vel)))
+
+        if not _bufs_ok(self._conv_copy):
+            self._conv_copy = tuple(torch.empty_like(v) for v in vel)
+        if not _bufs_ok(self._conv_out):
+            self._conv_out = tuple(torch.empty_like(v) for v in vel)
+        if not _bufs_ok(self._diff_copy):
+            self._diff_copy = tuple(torch.empty_like(v) for v in vel)
+
     # =================================================================
     # Convective-scheme solve  (advection + diffusion, dimension-agnostic)
     # =================================================================
 
-    def _get_step_scheme(self, vel):
-        """Return the advection scheme callable for this step.
-
-        For ABDQUICKEST the TVD limiter parameter C must equal the actual
-        advective Courant number |u|·dt/h.  Computing max-|u| requires one
-        GPU→CPU sync (.amax().item()), so it is done HERE — once per step,
-        outside any CUDA stream — and captured in a closure passed to _flux.
-        All other schemes return self._scheme unchanged (no sync).
-        """
-        if self._scheme_name == 'abdquickest':
-            h_min  = min(self.dh)
-            umax   = float(max(v.abs().amax() for v in vel))
-            C_step = min(max(umax * self.dt / h_min, 0.1), 0.99)
-            return lambda u, c, d, _C=C_step: self._scheme(u, c, d, C=_C)
-        return self._scheme
-
-    @property
-    def uses_cuda_flux_kernel(self):
-        """Whether ``solve`` will take the fused CUDA ``advect_flux_add`` path.
-
-        That path calls a hand-written custom op plus host-side ``.item()``
-        syncs, so wrapping it in ``torch.compile`` yields negligible benefit
-        and trips dynamo's speculation log (graph-break on restart).  Mirrors
-        the ``use_cuda_kernel`` guard inside :meth:`_solve_convective`.
-        """
-        return (
-            self._is_cuda
-            and self._scheme_name in _CUDA_SCHEME_IDS
-            and not (self._use_streams and self.ndim > 1)
-        )
-
-    def _solve_convective(self, *vel, nu_t=None, iteration=0):
-        """Forward-Euler advection-diffusion step.
+    def _solve_convective(self, *vel, nu_t=None, nu_eff=None, iteration=0):
+        """Forward-Euler advection-diffusion step — native end-to-end.
 
             phi^{n+1} = phi^n + dt * [-div(vel (x) phi) + diff(phi)]
 
@@ -598,125 +362,61 @@ class AdvDiffSolver:
 
         Accepts (u, v) in 2-D or (u, v, w) in 3-D.
 
-        Lazy clone: start with aliases of the input velocity components.
-        We replace ``vel_new[i]`` with a real clone only at the END of
-        iteration ``i`` (just before mutating it via ``+= rhs``).  During
-        iteration i's _flux peak, only the i already-cloned earlier
-        components are alive; the not-yet-mutated components are still
-        aliases of ``vel`` (the persistent u0/v0/w0) and cost zero extra
-        memory.
-
-        Multi-stream: when ``self._use_streams`` is True and device is CUDA,
-        each velocity component is processed on a separate CUDA stream.
-        The components are mutually independent (all read from the original
-        ``vel`` tuple), so concurrent execution is safe.  Trade-off: all
-        ``ndim`` rhs tensors are live simultaneously (vs one at a time in the
-        sequential path), so peak intermediate memory is ~ndim× higher for
-        the adv-diff phase.
+        Every launch goes to torch's current CUDA stream, so the whole
+        solve is CUDA-graph-capturable (13c):
+          1. ``conv_out[i].copy_(vel[i])``
+          2. ``native.diffuse_add(conv_out[i], diff_copy[i], ...)`` (in-place)
+          3. ``conv_copy[i].copy_(vel[i])``  (stencil for flux)
+          4. ``native.advect_flux_accumulate(conv_copy[i], conv_out[i],
+             vel, ...)`` — fused flux + interior accumulate
         """
         ndim    = self.ndim
         vel_new = list(vel)
         inner   = _inner(ndim)
 
-        # ---- CUDA fused-flux path (T2a) ----
-        # One kernel call per (velocity component i, spatial direction d)
-        # directly accumulates dt_dh*(F_left - F_right) into rhs without
-        # materialising the intermediate F tensor.  Not combined with the
-        # multi-stream path: both are forms of CUDA parallelism that are
-        # alternatives at this level.
-        use_cuda_kernel = (
-            self._is_cuda
-            and self._scheme_name in _CUDA_SCHEME_IDS
-            and not (self._use_streams and ndim > 1)
-        )
-        if use_cuda_kernel:
-            scheme_id = _CUDA_SCHEME_IDS[self._scheme_name]
-            if self._scheme_name == 'abdquickest':
-                h_min     = min(self.dh)
-                umax      = float(max(v.abs().amax() for v in vel))
-                C_courant = float(min(max(umax * self.dt / h_min, 0.1), 0.99))
-            else:
-                C_courant = 0.0
-            for i in range(ndim):
-                rhs = diffusion.diffuse(
-                    vel[i], self.dt, nu=self.nu, nu_t=nu_t,
-                    inv_dh2=self._inv_dh2, dh=self.dh,
-                )
-                for d in range(ndim):
-                    fv = _face_vel(vel, i, d, ndim)
-                    p  = _field_for_flux(vel[i], d, ndim)
-                    torch.ops.lilytorch_kernels.advect_flux_add(
-                        fv, p, rhs,
-                        float(self._dt_dh[d]), C_courant,
-                        scheme_id, d,
-                    )
-                    del fv, p
-                vel_new[i] = vel[i].clone()
-                vel_new[i][inner] += rhs
-                del rhs
-            return tuple(vel_new)
+        scheme_id = _CUDA_SCHEME_IDS[self._scheme_name]
+        # ABDQUICKEST uses a fixed Courant number C=0.1 — safe default that
+        # avoids the GPU→CPU sync of a live |u|·dt/h, making the flux kernel
+        # graph-capturable (no per-step varying scalar parameter).
+        C_courant = 0.1 if self._scheme_name == 'abdquickest' else 0.0
 
-        # ABDQUICKEST has a .amax().item() sync — must happen BEFORE any
-        # stream dispatch so all streams see the same C value.
-        scheme = self._get_step_scheme(vel)
+        # Normalise effective viscosity: if the caller already passed a
+        # pre-computed nu_eff (graph-safe path), use it as-is; otherwise
+        # build it from nu + nu_t (eager path) or leave it None (constant).
+        if nu_eff is None and nu_t is not None:
+            nu_eff = self._nu_float + nu_t
 
-        # ---- multi-stream path (CUDA only, ndim > 1) ----
-        if self._use_streams and self._is_cuda and ndim > 1:
-            if self._adv_streams is None:
-                self._adv_streams = [
-                    torch.cuda.Stream(device=self.device) for _ in range(ndim)
-                ]
-            cur = torch.cuda.current_stream()
-            for i, s in enumerate(self._adv_streams):
-                s.wait_stream(cur)          # inherit prior work from main stream
-                with torch.cuda.stream(s):
-                    rhs = diffusion.diffuse(
-                        vel[i], self.dt, nu=self.nu, nu_t=nu_t,
-                        inv_dh2=self._inv_dh2, dh=self.dh,
-                    )
-                    for d in range(ndim):
-                        fv = _face_vel(vel, i, d, ndim)
-                        p  = _field_for_flux(vel[i], d, ndim)
-                        F  = _flux(scheme, fv, p, d)
-                        F_diff = (F[_sl(ndim, d, slice(None, -1))]
-                                  - F[_sl(ndim, d, slice(1, None))])
-                        rhs.add_(F_diff, alpha=float(self._dt_dh[d]))
-                        del fv, F, F_diff
-                    vel_new[i] = vel[i].clone()
-                    vel_new[i][inner] += rhs
-            for s in self._adv_streams:
-                cur.wait_stream(s)          # main stream waits for all components
-            return tuple(vel_new)
+        # Ensure persistent buffers exist (lazy init, realloc on shape change).
+        self._init_convective_buffers(*vel)
 
-        # ---- sequential path (CPU, single-stream, or 1-D) ----
         for i in range(ndim):
-            # diffusion increment (fresh, writable tensor)
-            rhs = diffusion.diffuse(
-                vel[i], self.dt, nu=self.nu, nu_t=nu_t,
-                inv_dh2=self._inv_dh2, dh=self.dh,
+            # Step 1: copy vel[i] → conv_out[i] (final output buffer).
+            self._conv_out[i].copy_(vel[i])
+
+            # Step 2: in-place diffusion on output (double-buffer: copy + fused accumulate).
+            native.diffuse_add(
+                self._conv_out[i], self._diff_copy[i], self.dt,
+                dh=self.dh, nu_eff=nu_eff, nu=self._nu_float,
             )
-            # convective fluxes in each direction, accumulated into rhs.
-            # (inlined single-component form of advect_momentum so the
-            #  clone happens AFTER the d-loop peak — see lazy-clone note.)
-            for d in range(ndim):
-                fv = _face_vel(vel, i, d, ndim)
-                p  = _field_for_flux(vel[i], d, ndim)
-                F  = _flux(scheme, fv, p, d)
-                F_diff = (F[_sl(ndim, d, slice(None, -1))]
-                          - F[_sl(ndim, d, slice(1, None))])
-                rhs.add_(F_diff, alpha=float(self._dt_dh[d]))
-                del fv, F, F_diff
-            # NOW materialise the clone of vel[i] — we mutate it immediately.
-            vel_new[i] = vel[i].clone()
-            vel_new[i][inner] += rhs
-            del rhs  # free this component's rhs before the next i-iteration
+
+            # Step 3: copy vel[i] → conv_copy[i] (stencil source for flux).
+            self._conv_copy[i].copy_(vel[i])
+
+            # Step 4: fused advection flux, accumulated straight into the
+            # interior of conv_out (no separate rhs buffer / zero pass).
+            native.advect_flux_accumulate(
+                self._conv_copy[i], self._conv_out[i], vel, i,
+                self._dt_dh, C_courant, scheme_id,
+            )
+
+            vel_new[i] = self._conv_out[i]
 
         return tuple(vel_new)
 
     # =================================================================
     # Semi-Lagrangian solve  (Stam 1999, dimension-agnostic)
     # =================================================================
-    def _solve_semi_lagrangian(self, *vel, nu_t=None, iteration=0):
+    def _solve_semi_lagrangian(self, *vel, nu_t=None, nu_eff=None, iteration=0):
         """Unconditionally-stable advection via RK2 back-tracing (midpoint method).
 
         Uses a two-stage departure: first trace to x - 0.5*dt*u(x) (midpoint),
@@ -725,45 +425,96 @@ class AdvDiffSolver:
         (vs. 1st-order for the original Euler back-trace) with the same number
         of field evaluations per component as one full Euler step needs
         (ndim interpolations at current position + ndim at midpoint).
+
+        The fused :func:`sl_advect_2d_kernel` / :func:`sl_advect_3d_kernel`
+        Native kernels are the sole production path (CPU + CUDA), one launch
+        per solve.  The retired pure-Python interpolator reference is kept
+        as a standalone oracle in ``tests/test_advection.py``.
+
+        When *nu_eff* is given (pre-computed ``nu + nu_t``), it is
+        forwarded — no torch add inside the call, safe for
+        a CUDA graph.
         """
-        ndim  = self.ndim
-        shape = tuple(self.n)
+        ndim = self.ndim
+        if ndim not in (2, 3):
+            raise ValueError(f"SL solve supports 2-D or 3-D, got {ndim}-D")
+        if len(vel) != ndim:
+            raise ValueError(
+                f"SL solve expects {ndim} velocity components, got {len(vel)}")
+        return self._solve_semi_lagrangian(*vel, nu_t=nu_t, nu_eff=nu_eff)
 
-        # update interpolator data
-        for i in range(ndim):
-            self._interps[i].F = vel[i]
+    def _solve_semi_lagrangian(self, *vel, nu_t=None, nu_eff=None):
+        """Fused semi-Lagrangian solve (2-D or 3-D) — one native launch
+        (or CUDA-graph replay) does the full RK2 back-trace for all
+        staggered components, writing into persistent output buffers
+        (pointer-stable ⇒ graph-capturable).  The explicit-diffusion
+        pass stays separate (cheap).
 
-        vel_new = list(vel)
-        half_dt = 0.5 * self.dt
-        for i in range(ndim):
-            # Stage 1: velocity at current grid position → midpoint departure
-            vel_at_i = [
-                self._interps[d](*self._flat_coords[i]).clone()
-                for d in range(ndim)
-            ]
-            midpoint = [
-                self._flat_coords[i][d] - half_dt * vel_at_i[d]
-                for d in range(ndim)
-            ]
-            # Stage 2: velocity at midpoint → full-step departure
-            vel_at_mid = [
-                self._interps[d](*midpoint).clone()
-                for d in range(ndim)
-            ]
-            departure = [
-                self._flat_coords[i][d] - self.dt * vel_at_mid[d]
-                for d in range(ndim)
-            ]
-            vel_new[i] = self._interps[i](*departure).reshape(shape).clone()
+        When *nu_eff* is given (pre-computed ``nu + nu_t``), it is
+        forwarded directly to :func:`diffuse_add_` — no torch add
+        inside the call, safe for CUDA-graph capture."""
+        ndim = self.ndim
+        out = self._sl_out
+        dev = vel[0].device
+        dtype = vel[0].dtype
 
-        # explicit diffusion
-        inner = _inner(ndim)
-        for i in range(ndim):
-            vel_new[i][inner] += diffusion.diffuse(
-                vel_new[i], self.dt, nu=self.nu, nu_t=nu_t,
-                inv_dh2=self._inv_dh2, dh=self.dh,
+        # Build / rebuild output buffers if the signature changed.
+        if (out is None
+                or len(out) != ndim
+                or out[0].shape != vel[0].shape
+                or out[0].dtype != dtype
+                or out[0].device != dev):
+            self._sl_out = out = tuple(torch.empty_like(v) for v in vel)
+            # Persistent full-grid copy buffers for the double-buffer
+            # diffusion accumulate (native.diffuse_add): each buffer
+            # is the same shape as the velocity field.
+            self._diff_out = tuple(
+                torch.empty_like(v) for v in vel)
+            # Move grid axes to the right device/dtype once.
+            flat_axes = []
+            for comp_axes in self._sl_axes_1d:
+                for g in comp_axes:
+                    flat_axes.append(g.to(device=dev, dtype=dtype).contiguous())
+            self._sl_axes_dev = tuple(flat_axes)
+
+        if ndim == 2:
+            u, v = vel
+            out_u, out_v = out
+            gxu, gyu, gxv, gyv = self._sl_axes_dev
+            iu, iv = self._interps
+            native.sl_advect_2d(
+                u, v, out_u, out_v, gxu, gyu, gxv, gyv,
+                iu._bx0, iu._by0, iu._inv_dx, iu._inv_dy,
+                iv._bx0, iv._by0, iv._inv_dx, iv._inv_dy,
+                self.dt,
             )
+            vel_new = [out_u, out_v]
+        else:  # ndim == 3
+            u, v, w = vel
+            out_u, out_v, out_w = out
+            (gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw) = self._sl_axes_dev
+            iu, iv, iw = self._interps
+            native.sl_advect_3d(
+                u, v, w, out_u, out_v, out_w,
+                gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw,
+                iu._bx0, iu._by0, iu._bz0, iu._inv_dx, iu._inv_dy, iu._inv_dz,
+                iv._bx0, iv._by0, iv._bz0, iv._inv_dx, iv._inv_dy, iv._inv_dz,
+                iw._bx0, iw._by0, iw._bz0, iw._inv_dx, iw._inv_dy, iw._inv_dz,
+                self.dt,
+            )
+            vel_new = [out_u, out_v, out_w]
 
+        # Normalise effective viscosity (same pattern as _solve_convective).
+        if nu_eff is None and nu_t is not None:
+            nu_eff = self._nu_float + nu_t
+
+        # Explicit diffusion — native in-place accumulate (no torch ops,
+        # graph-capturable).
+        for i in range(ndim):
+            native.diffuse_add(
+                vel_new[i], self._diff_out[i], self.dt,
+                dh=self.dh, nu_eff=nu_eff, nu=self._nu_float,
+            )
         return tuple(vel_new)
 
     # =================================================================
@@ -1099,7 +850,7 @@ class AdvDiffSolver:
                 and vel[1].is_contiguous()
                 and vel[2].is_contiguous()):
             cache = self._build_fused_bc_cache(vel)
-            torch.ops.lilytorch_kernels.apply_bcs_3d(
+            native.apply_bcs_3d(
                 vel[0], vel[1], vel[2],
                 cache["shapes"],
                 cache["neu_desc"],
@@ -1121,7 +872,7 @@ class AdvDiffSolver:
                 and vel[0].is_contiguous()
                 and vel[1].is_contiguous()):
             cache = self._build_fused_bc_cache_2d(vel)
-            torch.ops.lilytorch_kernels.apply_bcs_2d(
+            native.apply_bcs_2d(
                 vel[0], vel[1],
                 cache["shapes"],
                 cache["neu_desc"],

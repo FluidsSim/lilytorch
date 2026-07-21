@@ -1,0 +1,42 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="ramp">
+    <pose>0 0 0 0 0 0</pose>
+    <link name="ramp_link">
+      <pose>0 0 0 0 0 0</pose>
+      <inertial>
+        <mass>1000000.0</mass>
+        <inertia>
+          <ixx>753333.3333333333</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>1366666.6666666665</iyy>
+          <iyz>0</iyz>
+          <izz>2113333.333333333</izz>
+        </inertia>
+      </inertial>
+      <collision name="ramp_collision">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>4.044749683231337 3.0 0.2</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="ramp_visual">
+        <pose>0 0 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>4.044749683231337 3.0 0.2</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.45 0.42 0.38 1.0</ambient>
+          <diffuse>0.55 0.52 0.48 1.0</diffuse>
+          <specular>0.10 0.10 0.10 1.0</specular>
+          <emissive>0.0  0.0  0.0  1.0</emissive>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

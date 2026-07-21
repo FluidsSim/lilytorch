@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 import torch
-from lilytorch.src.kernels import RegularGridInterpolator, RegularGridInterpolatorAutomatic
+from lilytorch.src.native import RegularGridInterpolator
 
 logger = logging.getLogger(__name__)
 
@@ -713,62 +713,6 @@ def box_3d(x, y, z, xb=20, yb=20, zb=20):
         )
     )
 
-def resample_contour_exact_spacing(x, y, spacing, closed=True):
-    """
-    Resample contour with exactly constant spacing
-    """
-    if closed:
-        if x[0] != x[-1] or y[0] != y[-1]:
-            x = np.r_[x, x[0]]
-            y = np.r_[y, y[0]]
-
-    # Convert to points array
-    points = np.column_stack([x, y])
-    resampled_points = [points[0]]
-
-    # Walk along contour with exact spacing
-    current_position = points[0].copy()
-    segment_idx = 0
-    distance_along_segment = 0.0
-
-    while segment_idx < len(points) - 1:
-        # Current segment
-        segment_start = points[segment_idx]
-        segment_end = points[segment_idx + 1]
-        segment_vector = segment_end - segment_start
-        segment_length = np.linalg.norm(segment_vector)
-
-        # Distance remaining in current segment
-        remaining_in_segment = segment_length - distance_along_segment
-
-        if remaining_in_segment >= spacing:
-            # Place next point within current segment
-            if segment_length > 1e-12:  # Avoid division by zero
-                direction = segment_vector / segment_length
-                current_position = segment_start + (distance_along_segment + spacing) * direction
-                resampled_points.append(current_position.copy())
-                distance_along_segment += spacing
-            else:
-                # Degenerate segment, skip
-                segment_idx += 1
-                distance_along_segment = 0.0
-        else:
-            # Move to next segment
-            segment_idx += 1
-            distance_along_segment = spacing - remaining_in_segment
-
-    resampled_points = np.array(resampled_points)
-
-    # Compute arc-length coordinates
-    if len(resampled_points) > 1:
-        diffs = np.diff(resampled_points, axis=0)
-        distances = np.linalg.norm(diffs, axis=1)
-        s_uniform = np.concatenate(([0], np.cumsum(distances)))
-    else:
-        s_uniform = np.array([0])
-
-    return resampled_points[:, 0], resampled_points[:, 1], s_uniform
-
 def resample_contour(x, y, spacing, closed=True):
         x = np.r_[x, x[0]]
         y = np.r_[y, y[0]]
@@ -783,36 +727,6 @@ def resample_contour(x, y, spacing, closed=True):
         y_new = np.r_[y_new, y_new[0]]
 
         return x_new, y_new, s_uniform
-
-def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
-    """
-    Compute the inertial properties of a 2D shape defined by an SDF over a grid
-    sdf_fun: function that takes (N,M,2) array of points and returns (N,M) array of sdf values
-    inside_mask: (N,M) boolean array where True indicates points inside the shape
-    x: (N,) array of x coordinates of the grid
-    y: (M,) array of y coordinates of the grid
-    x_g, y_g: coordinates of the centroid
-    density: material density
-    """
-    dx = x[1]-x[0]
-    dy = y[1]-y[0]
-    xx, yy = np.meshgrid(x, y)
-
-    dA = dx * dy
-    mass = density * np.sum(inside_mask) * dA
-
-
-    # Raw moments about the origin
-    I_x = np.sum((yy[inside_mask]**2) * dA) # around x-axis (horizontal), i.e. y^2 dA
-    I_y = np.sum((xx[inside_mask]**2) * dA) # around y-axis (vertical), i.e. x^2 dA
-    I_xy = np.sum((xx[inside_mask]*yy[inside_mask]) * dA)
-
-    # Shift to centroid using parallel axis theorem
-    I_x_centroid = I_x - mass * y_g**2
-    I_y_centroid = I_y - mass * x_g**2
-    I_xy_centroid = I_xy - mass * x_g * y_g
-
-    return mass, I_x_centroid, I_y_centroid, I_xy_centroid
 
 
 def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starting_time=0, z=None, **kwargs):
@@ -893,7 +807,6 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             convexify          = body_pars["convexify"],
             scale              = body_pars["scale"],
             save_folder        = body_pars["save_folder"],
-            use_kernels        = kwargs.pop("use_kernels", False),
             **kwargs
         )
 
@@ -932,14 +845,9 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             initial_time    = starting_time,
         )
 
-    elif body_type == "composite_segment_body":
-        sdf_name = body_pars["sdf_name"]
-        sdf_folder = body_pars["sdf_folder"]
-        return CompositeSegmentBody(
-                    device, x, y,
-                    sdf_folder, sdf_name,
-                    eps=eps,
-                )
+    else:
+        raise ValueError(f"Unknown body type: {body_type}")
+
 
 class mesh2sdf():
     """
@@ -1024,61 +932,6 @@ class mesh2sdf():
         viewer.run()
         viewer.destroy_window()
 
-
-class COMPOSITEmesh2sdf():
-
-    def __init__(self, sdf_name, sdf_folder):
-        """
-        sdf_folder = folder of the sdf file
-        sdf_name = name of the sdf file
-        """
-        self.sdf = _import_model_sdf().read(sdf_folder+sdf_name)[0]
-        self.sdfs = []
-        for link in self.sdf.links:
-            mesh_name = link["visuals"][0]["geometry"]["uri"]
-            sdf = mesh2sdf(sdf_folder+mesh_name)
-            # initial translation according to the initial poses in the world reference frame (assumes no initial rotation)
-            # sdf.translate_3d(link.pose[:3])
-            self.sdfs.append(sdf)
-
-    def transform_3d(self, quat_list=[], center_list=[], pos_list=[]):
-        """Apply quaternion rotations and translations to each link mesh.
-
-        .. note::
-           Not yet implemented — the underlying ``mesh2sdf`` class does not
-           expose a ``transform_3d`` method.  Add the required mesh
-           transformation logic to ``mesh2sdf`` first.
-        """
-        raise NotImplementedError(
-            "COMPOSITEmesh2sdf.transform_3d requires mesh2sdf.transform_3d "
-            "which has not been implemented yet."
-        )
-
-
-    def __call__(self, points_in_object_frame: np.array):
-
-        sdfv = []
-        sdfg = []
-        for i, sdf in enumerate(self.sdfs):
-            v, g = sdf(points_in_object_frame)
-            sdfv.append(v)
-            sdfg.append(g)
-        return sdfv, sdfg
-
-
-    def visualize(self):
-        o3d = _import_open3d()
-
-        viewer = o3d.visualization.Visualizer()
-        viewer.create_window()
-        for sdf in self.sdfs:
-            viewer.add_geometry(o3d.geometry.LineSet.create_from_triangle_mesh(sdf._mesh))
-        opt = viewer.get_render_option()
-        opt.show_coordinate_frame = True
-        opt.background_color = np.asarray([0.5, 0.5, 0.5])
-        viewer.run()
-        viewer.destroy_window()
-
 class Body:
 
     def __init__(self, device, x, y, z=None, eps=0.05):
@@ -1117,17 +970,41 @@ class Body:
 
         self.rad_conv   = (torch.pi / 180)
 
+    def _publish(self, name, value):
+        """Write ``value`` into a persistent buffer and return that buffer.
+
+        The BDIM fields a body publishes each step (``sdf_val``, the staggered
+        ``sdf_u/v/w`` and ``body_u/v/w``) are hashed BY POINTER into the
+        pre-Poisson CUDA-graph key.  Rebinding them to freshly-allocated
+        tensors every ``update()`` — which is what the plain
+        ``self.sdf_val = self.sdf(px, py)`` form does — churns the key, so the
+        graph can never replay: it re-captures every single step (~80 ms at
+        128^2, a ~50x pessimisation vs the eager path).  Routing every published
+        field through a persistent buffer keeps the pointers stable, so the key
+        repeats and the graph replays.
+
+        The buffer is reallocated only on a shape/dtype/device change.
+        """
+        bufs = getattr(self, "_persist_bufs", None)
+        if bufs is None:
+            bufs = self._persist_bufs = {}
+        buf = bufs.get(name)
+        if (buf is None or buf.shape != value.shape
+                or buf.dtype != value.dtype or buf.device != value.device):
+            buf = torch.empty_like(value)
+            bufs[name] = buf
+        buf.copy_(value)
+        return buf
+
     def _setup_grids(self):
         """Bind full staggered meshgrids to this body instance.
 
         Called eagerly by composite / standalone body classes (e.g.
         ``CompositeBodyAnalytical``, ``BodyFishAnalytical``,
-        ``CompositeBodyMesh``) after ``super().__init__()``, and by
-        ``MultiAnimatBodies`` when ``use_kernels=False`` (python mode).
-        In kernel mode ``MultiAnimatBodies`` skips this call entirely so
-        no staggered-grid tensors are allocated.  Child ``BodyAnalytical``
-        instances inside a
-        composite do *not* call this.
+        ``CompositeBodyMesh``) after ``super().__init__()``.
+        ``MultiAnimatBodies`` (the FARMS streaming provider) skips this
+        call entirely so no staggered-grid tensors are allocated.  Child
+        ``BodyAnalytical`` instances inside a composite do *not* call this.
         """
         g = _get_staggered_grids(self.x, self.y, self.z)
         self._grids  = g
@@ -1166,67 +1043,6 @@ class Body:
 
         normals = tuple(g * inv_norm for g in grads)
         return normals
-
-    def compute_normals_3d_batched(self, sdf_vals_4):
-        """Compute unit normals for 4 stacked SDF grids in one pass.
-
-        Parameters
-        ----------
-        sdf_vals_4 : (4, Nx, Ny, Nz) tensor — the p/u/v/w SDF fields stacked
-                     along dimension 0.
-
-        Returns
-        -------
-        (nx, ny, nz) : each (4, Nx, Ny, Nz) — batched unit normals.
-        """
-        h = self.h
-        gx, gy, gz = torch.gradient(sdf_vals_4, spacing=[h, h, h],
-                                     dim=[1, 2, 3], edge_order=2)
-        norm = torch.sqrt(gx**2 + gy**2 + gz**2)
-        inv_norm = torch.where(norm > 0, norm.reciprocal(), torch.zeros_like(norm))
-        nx = gx * inv_norm
-        ny = gy * inv_norm
-        nz = gz * inv_norm
-        return (nx, ny, nz)
-
-    def mu_funcs_batched(self, d):
-        """Heaviside mu_0 and mu_1 — works on any shape (including batched).
-
-        Narrow-band optimised: sin/cos are only evaluated where ``|d|`` < eps,
-        which is typically < 5 % of the grid, giving a large speedup.
-
-        Parameters
-        ----------
-        d : tensor of any shape (e.g. (3, Nx, Ny) or (4, Nx, Ny, Nz)).
-
-        Returns
-        -------
-        (mu_0, mu_1) : tensors with the same shape as d.
-        """
-        eps = self.eps
-        # Pre-fill: 0 inside body (d<0), 1 in fluid (d>=0);
-        # band values will be overwritten below.
-        mu_0 = (d >= 0).to(d.dtype)
-        mu_1 = torch.zeros_like(d)
-
-        band = (d > -eps) & (d < eps)
-        d_b  = d[band]
-        deps = d_b / eps
-        s = torch.sin(torch.pi * deps)
-        c = torch.cos(torch.pi * deps)
-        mu_0[band] = 0.5 * (1 + deps + s / torch.pi)
-        mu_1[band] = eps * (0.25 - (0.5 * deps)**2
-                            - (s * deps + (1 + c) / torch.pi) / (2 * torch.pi))
-        return (mu_0, mu_1)
-
-    def phi(self,d):
-        # return 0.5+0.5*torch.cos(torch.pi*d.clamp(-1,1))
-        return torch.where(
-            torch.abs(d)<self.eps,
-            ( 1 + torch.cos(torch.pi*d/self.eps) )/( 2*self.eps ),
-            torch.zeros_like(d)
-        )
-
 
     def mu_funcs(self, d):
         """Narrow-band optimised: sin/cos only where ``|d|`` < eps."""
@@ -1655,23 +1471,25 @@ class BodyAnalytical(Body):
             ang_vel = _safe_grad(w, t_var)
 
             # SDF at cell-centres (meshgrid broadcasting)
+            # Every published field goes through _publish: the pre-Poisson CUDA
+            # graph keys on these pointers, so they must not be rebound.
             px, py = rotate_grid_2d(grids.X, grids.Y, R_T, transl)
-            self.sdf_val = self.sdf(px, py)
+            self.sdf_val = self._publish('sdf_val', self.sdf(px, py))
 
             # SDF at u-faces
             px, py = rotate_grid_2d(grids.Xu_stag, grids.Yu_stag, R_T, transl)
-            self.sdf_u = self.sdf(px, py)
+            self.sdf_u = self._publish('sdf_u', self.sdf(px, py))
 
             # SDF at v-faces
             px, py = rotate_grid_2d(grids.Xv_stag, grids.Yv_stag, R_T, transl)
-            self.sdf_v = self.sdf(px, py)
+            self.sdf_v = self._publish('sdf_v', self.sdf(px, py))
 
             # body velocities (staggered)
             # v = v_lin + ω × r  (2-D:  ω×r = (-ω*ry, ω*rx))
             ry_u = grids.Yu_stag - transl[1]
-            self.body_u = lin_vel_x - ang_vel * ry_u
+            self.body_u = self._publish('body_u', lin_vel_x - ang_vel * ry_u)
             rx_v = grids.Xv_stag - transl[0]
-            self.body_v = lin_vel_y + ang_vel * rx_v
+            self.body_v = self._publish('body_v', lin_vel_y + ang_vel * rx_v)
 
             # Aliases so standalone BodyAnalytical works directly with solver
             self.sdf_val_u = self.sdf_u
@@ -1712,10 +1530,16 @@ class BodyAnalytical(Body):
                 px, py, pz = rotate_grid_3d(X, Y, Z, R_T, transl)
                 return self.sdf(px, py, pz)
 
-            self.sdf_val = _eval_sdf(grids.X, grids.Y, grids.Z_grid)
-            self.sdf_u = _eval_sdf(grids.Xu_stag, grids.Yu_stag, grids.Zu_stag)
-            self.sdf_v = _eval_sdf(grids.Xv_stag, grids.Yv_stag, grids.Zv_stag)
-            self.sdf_w = _eval_sdf(grids.Xw_stag, grids.Yw_stag, grids.Zw_stag)
+            # _publish: keep the published pointers stable so the pre-Poisson
+            # CUDA graph (which keys on them) can replay instead of re-capturing.
+            self.sdf_val = self._publish(
+                'sdf_val', _eval_sdf(grids.X, grids.Y, grids.Z_grid))
+            self.sdf_u = self._publish(
+                'sdf_u', _eval_sdf(grids.Xu_stag, grids.Yu_stag, grids.Zu_stag))
+            self.sdf_v = self._publish(
+                'sdf_v', _eval_sdf(grids.Xv_stag, grids.Yv_stag, grids.Zv_stag))
+            self.sdf_w = self._publish(
+                'sdf_w', _eval_sdf(grids.Xw_stag, grids.Yw_stag, grids.Zw_stag))
 
             # body velocities: v = v_lin + ω × r
             # ω × r = (ωy*rz - ωz*ry, ωz*rx - ωx*rz, ωx*ry - ωy*rx)
@@ -1728,12 +1552,15 @@ class BodyAnalytical(Body):
                 bw = lin_vel_z + ang_vel_x * ry - ang_vel_y * rx
                 return bu, bv, bw
 
-            self.body_u, _, _ = _body_vel_component(
+            bu, _, _ = _body_vel_component(
                 grids.Xu_stag, grids.Yu_stag, grids.Zu_stag)
-            _, self.body_v, _ = _body_vel_component(
+            _, bv, _ = _body_vel_component(
                 grids.Xv_stag, grids.Yv_stag, grids.Zv_stag)
-            _, _, self.body_w = _body_vel_component(
+            _, _, bw = _body_vel_component(
                 grids.Xw_stag, grids.Yw_stag, grids.Zw_stag)
+            self.body_u = self._publish('body_u', bu)
+            self.body_v = self._publish('body_v', bv)
+            self.body_w = self._publish('body_w', bw)
 
             # Aliases so standalone BodyAnalytical works directly with solver
             self.sdf_val_u = self.sdf_u
@@ -1787,33 +1614,54 @@ class CompositeBodyAnalytical(Body):
     def update(self, t, iteration, dt=1):
         # Streaming union: process bodies one at a time to avoid
         # allocating (nbodies, *grid_shape) stacks.
-        for i, body in enumerate(self.bodies):
+        #
+        # The fields published here are hashed by pointer into the pre-Poisson
+        # CUDA-graph key (see Body._publish), so they must be pointer-stable.
+        # Single body: alias the child's persistent buffers directly (stable,
+        # and costs no extra memory).  True union: fold into the composite's own
+        # persistent buffers, since body 0's buffers must not be clobbered.
+        for body in self.bodies:
             body.update(t, iteration, dt=dt, grids=self._grids)
-            if i == 0:
-                self.sdf_val   = body.sdf_val
-                self.sdf_val_u = body.sdf_u
-                self.body_u    = body.body_u
-                self.sdf_val_v = body.sdf_v
-                self.body_v    = body.body_v
-                if self.ndim == 3:
-                    self.sdf_val_w = body.sdf_w
-                    self.body_w    = body.body_w
-            else:
-                mask = body.sdf_val < self.sdf_val
-                self.sdf_val = torch.where(mask, body.sdf_val, self.sdf_val)
 
-                mask_u = body.sdf_u < self.sdf_val_u
-                self.sdf_val_u = torch.where(mask_u, body.sdf_u, self.sdf_val_u)
-                self.body_u    = torch.where(mask_u, body.body_u, self.body_u)
+        b0 = self.bodies[0]
+        if self.nbodies == 1:
+            self.sdf_val   = b0.sdf_val
+            self.sdf_val_u = b0.sdf_u
+            self.body_u    = b0.body_u
+            self.sdf_val_v = b0.sdf_v
+            self.body_v    = b0.body_v
+            if self.ndim == 3:
+                self.sdf_val_w = b0.sdf_w
+                self.body_w    = b0.body_w
+            return
 
-                mask_v = body.sdf_v < self.sdf_val_v
-                self.sdf_val_v = torch.where(mask_v, body.sdf_v, self.sdf_val_v)
-                self.body_v    = torch.where(mask_v, body.body_v, self.body_v)
+        self.sdf_val   = self._publish('sdf_val',   b0.sdf_val)
+        self.sdf_val_u = self._publish('sdf_val_u', b0.sdf_u)
+        self.body_u    = self._publish('body_u',    b0.body_u)
+        self.sdf_val_v = self._publish('sdf_val_v', b0.sdf_v)
+        self.body_v    = self._publish('body_v',    b0.body_v)
+        if self.ndim == 3:
+            self.sdf_val_w = self._publish('sdf_val_w', b0.sdf_w)
+            self.body_w    = self._publish('body_w',    b0.body_w)
 
-                if self.ndim == 3:
-                    mask_w = body.sdf_w < self.sdf_val_w
-                    self.sdf_val_w = torch.where(mask_w, body.sdf_w, self.sdf_val_w)
-                    self.body_w    = torch.where(mask_w, body.body_w, self.body_w)
+        for body in self.bodies[1:]:
+            # min-union on the SDF; the winning body also supplies the velocity.
+            # copy_ into the persistent buffers (never rebind them).
+            mask = body.sdf_val < self.sdf_val
+            self.sdf_val.copy_(torch.where(mask, body.sdf_val, self.sdf_val))
+
+            mask_u = body.sdf_u < self.sdf_val_u
+            self.body_u.copy_(torch.where(mask_u, body.body_u, self.body_u))
+            self.sdf_val_u.copy_(torch.where(mask_u, body.sdf_u, self.sdf_val_u))
+
+            mask_v = body.sdf_v < self.sdf_val_v
+            self.body_v.copy_(torch.where(mask_v, body.body_v, self.body_v))
+            self.sdf_val_v.copy_(torch.where(mask_v, body.sdf_v, self.sdf_val_v))
+
+            if self.ndim == 3:
+                mask_w = body.sdf_w < self.sdf_val_w
+                self.body_w.copy_(torch.where(mask_w, body.body_w, self.body_w))
+                self.sdf_val_w.copy_(torch.where(mask_w, body.sdf_w, self.sdf_val_w))
 
 
 class BodyFishAnalytical(Body):
@@ -2065,23 +1913,6 @@ class BodyFishExperimental(Body):
 
         self.initialize()
 
-    def thk_liu(self, s):
-        """
-        fish width
-        """
-
-        s1, s2, s3, s4, w1, w2 = self.s1, self.s2, self.s3, self.s4, self.w1, self.w2
-        s_star                 = s / ( s4 * self.L )
-
-        c0, c1, c2, c3, c4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
-        x0, x1, x2, x3, x4 = s_star**0.5, s_star, s_star**2, s_star**3, s_star**4
-
-        return torch.where(
-            s < s3 * self.L,
-            5 * (s4 * w1) * ( c0*x0 + c1*x1 + c2*x2 + c3*x3 + c4*x4 ),
-            w2
-        )
-
     def thk_gazzola(self,s):
         """
         fish width
@@ -2227,64 +2058,6 @@ class BodyMesh(Body):
         del self.m2s
         self.initialize()
         self.bodies = [self]
-
-
-    def resample_closed_contour(self, points, spacing, keep_duplicate_endpoint=True):
-        """
-        Resample a closed contour for (approximately) uniform spacing.
-
-        - points: (M,2) numpy array of (x,y). Can be closed (first==last) or open; treated as closed.
-        - spacing: desired spacing between resampled points (float > 0).
-        - keep_duplicate_endpoint: if True, return N+1 points with last == first
-          (explicit closure); if False, return N points (no duplicate at end).
-
-        Returns:
-
-        - new_pts: (N+1,2) or (N,2) array of resampled points.
-        - actual_spacing: total_length / N  (the spacing actually used)
-        """
-        pts = np.asarray(points, dtype=float)
-        if pts.ndim != 2 or pts.shape[1] < 2:
-            raise ValueError("points must be an (M,2) array-like")
-
-        if spacing <= 0:
-            raise ValueError("spacing must be positive")
-
-        # If not already closed, append first point for segment math
-        if not np.allclose(pts[0], pts[-1]):
-            pts_closed = np.vstack([pts, pts[0]])
-        else:
-            pts_closed = pts.copy()
-
-        # segment vectors and lengths
-        segs = pts_closed[1:] - pts_closed[:-1]
-        seg_lens = np.hypot(segs[:,0], segs[:,1])
-        total_length = seg_lens.sum()
-        if total_length == 0:
-            raise ValueError("zero-length contour")
-
-        # choose number of equal intervals such that spacing ~ requested spacing
-        N = max(3, int(round(total_length / spacing)))
-        actual_spacing = total_length / N
-
-        # cumulative distances along the closed polyline (start at 0, last = total_length)
-        s = np.concatenate(([0.0], np.cumsum(seg_lens)))
-        # x,y coordinates corresponding to s
-        x = pts_closed[:,0]
-        y = pts_closed[:,1]
-
-        # target sample locations: include the final total_length so last interpolates to first point
-        target_s = np.linspace(0.0, total_length, N+1)
-
-        # np.interp requires strictly increasing x; s is non-decreasing
-        xi = np.interp(target_s, s, x)
-        yi = np.interp(target_s, s, y)
-        new_pts = np.vstack([xi, yi]).T
-
-        if not keep_duplicate_endpoint:
-            return new_pts[:-1], actual_spacing  # return N points
-        return new_pts, actual_spacing      # return N+1 points where last==first
-
 
     def compute_sdfs(self, zpos=0):
         """Compute the SDF from the mesh and build an interpolation function.
@@ -2567,7 +2340,7 @@ class BodyMesh(Body):
         curv_coord = np.load(os.path.join(self.save_folder, f"curv_coord_{mesh_tag}.npy"))
         sign_vec = np.load(os.path.join(self.save_folder, f"sign_vec_{mesh_tag}.npy"))
 
-        self.sdf = RegularGridInterpolatorAutomatic(
+        self.sdf = RegularGridInterpolator(
             (
                 torch.from_numpy(xnp).type(self.dtype).to(self.device),
                 torch.from_numpy(ynp).type(self.dtype).to(self.device)
@@ -2594,7 +2367,7 @@ class BodyMesh(Body):
     def _initialize_3d_mesh(self, xnp, ynp, sdf_val, mesh_tag):
         znp = np.load(os.path.join(self.save_folder, f"znp_{mesh_tag}.npy"))
 
-        self.sdf = RegularGridInterpolatorAutomatic(
+        self.sdf = RegularGridInterpolator(
             (
                 torch.from_numpy(xnp).type(self.dtype).to(self.device),
                 torch.from_numpy(ynp).type(self.dtype).to(self.device),
@@ -2757,49 +2530,23 @@ class CompositeBodyMesh(Body):
         viewer.destroy_window()
 
 
-    # Function to create a Gaussian kernel
-    def gaussian_kernel(self, size: int, sigma: float):
-        """Creates a 2D Gaussian kernel."""
-        x_coord = torch.arange(size, dtype=self.dtype, device=self.device)
-        x_grid = x_coord.repeat(size).view(size, size)
-        y_grid = x_grid.t()
-
-        xy_grid = torch.stack([x_grid, y_grid], dim=-1)
-
-        mean = (size - 1) * 0.5
-        variance = sigma * sigma
-
-        two_pi_var = torch.tensor(2.0 * 3.141592653589793 * variance,
-                                  dtype=self.dtype, device=self.device)
-        two_var = torch.tensor(2.0 * variance,
-                               dtype=self.dtype, device=self.device)
-        gaussian_kernel = two_pi_var.reciprocal() * \
-                        torch.exp(
-                            -torch.sum((xy_grid - mean) ** 2., dim=-1) *
-                            two_var.reciprocal()
-                        )
-
-        gaussian_kernel = gaussian_kernel * gaussian_kernel.to(torch.float64).sum().to(self.dtype).reciprocal()
-        return gaussian_kernel
-
-
-
-
 class MultiAnimatBodies(Body):
 
     def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
                  nsamples=None, msamples=None, ksamples=None, plotting=False, plotting_meshes=False,
-                 suit=0.0, use_kernels=False, **kwargs):
+                 suit=0.0, **kwargs):
         """Union of bodies from one or more MuJoCo/SDF model files.
 
         Mesh-based bodies that share the same mesh file (and scale) are
         automatically deduplicated: the expensive open3d → skfmm → interpolation
         pipeline runs only once per unique mesh, and the resulting BodyMesh
         is reused (with its own pose) for every duplicate.
+
+        BDIMhandler streams the per-step geometry (the rigid ``body_update``
+        kernel), so neither the staggered meshgrids nor the persistent
+        staggered SDF / body-velocity fields are allocated here.
         """
         super().__init__(device, x, y, z=z, eps=eps)
-        if not use_kernels:
-            self._setup_grids()
 
         self.suit = suit
         self.plotting        = plotting
@@ -3158,26 +2905,18 @@ class MultiAnimatBodies(Body):
         # Initialised to the SDF sentinel _FAR=1e4 (i.e. "outside body
         # everywhere") rather than zeros.  This lets BDIMhandler restrict
         # the first-step "dirty AABB" (the region reset to _FAR + recomputed
-        # by Kernel A) to only the bodies' current footprint instead of the
+        # by the streaming body_update) to only the bodies' footprint, not the
         # whole grid — which on a 512³ run shrinks the int64 key buffers
         # from 4×1 GiB = 4 GiB to a few MB.  Cells the bodies never visit
         # keep their _FAR value, which is the correct "outside body" answer
         # for the BDIM stencil.
         self.sdf_val   = torch.full(gs, 1e4, device=device, dtype=self.dtype)
-        # In kernel mode the staggered face-SDF and rigid-body face-velocity
-        # tensors are per-step temporaries owned by FluidSolver.fluid_step —
-        # they live only between Kernel A (streaming SDF) and Kernel B
-        # (fused BDIM2 + var-dens) of the same step.  Skip the persistent
-        # full-grid allocations here to save 6 * Ngrid * sizeof(float)
-        # of permanent GPU storage per composite body.
-        if not use_kernels:
-            self.sdf_val_u = torch.zeros(gs, device=device, dtype=self.dtype)
-            self.sdf_val_v = torch.zeros(gs, device=device, dtype=self.dtype)
-            self.body_u    = torch.zeros(gs, device=device, dtype=self.dtype)
-            self.body_v    = torch.zeros(gs, device=device, dtype=self.dtype)
-            if self.ndim == 3:
-                self.sdf_val_w = torch.zeros(gs, device=device, dtype=self.dtype)
-                self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
+        # The staggered face-SDF and rigid-body face-velocity tensors are
+        # per-step scratch fields published by the rigid streaming
+        # ``body_update`` (BDIMhandler._launch_body_update) and released by
+        # the solver's fused step before the pressure projection.  No
+        # persistent full-grid allocations here — saves 6 * Ngrid *
+        # sizeof(float) of permanent GPU storage per composite body.
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
         # Null out any SDF tensor that was stored directly on a child body

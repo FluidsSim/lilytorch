@@ -15,8 +15,8 @@ from lilytorch.util.paths import save_path
 import matplotlib.pyplot as plt
 plt.rcParams['font.size'] = '20'
 
-
-RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T10:58:54.544939")
+RUN_DIR = os.path.join(save_path, "2026-07-21T12:54:11.017117")
+# RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T10:58:54.544939")
 SIMULATION_PATH = os.path.join(RUN_DIR, "output", "simulation.hdf5")
 TRACK_CSV_PATH = "/data/andreaferrario/1guilla_experiments/swim/videos/ms007mpt001_track.csv"
 HEAD_LINK_NAME = "link0"

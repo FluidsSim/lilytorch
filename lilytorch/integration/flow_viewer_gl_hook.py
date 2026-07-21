@@ -51,11 +51,21 @@ _GL_HOOK_C_SOURCE = r"""
 
 #define CUDA_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD 2U
 #define CUDA_MEMCPY_DEVICE_TO_DEVICE 3
+#define CUDA_STREAM_NON_BLOCKING 0x01U
+#define CUDA_EVENT_DISABLE_TIMING 0x02U
 
 typedef int cudaError_t;
 typedef void* cudaGraphicsResource_t;
+typedef void* cudaStream_t;
+typedef void* cudaEvent_t;
 
 extern cudaError_t cudaSetDevice(int device);
+extern cudaError_t cudaStreamCreateWithFlags(cudaStream_t* pStream, unsigned int flags);
+extern cudaError_t cudaEventCreateWithFlags(cudaEvent_t* event, unsigned int flags);
+extern cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream);
+extern cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags);
+extern cudaError_t cudaMemcpyAsync(
+    void* dst, const void* src, size_t count, int kind, cudaStream_t stream);
 extern cudaError_t cudaGraphicsGLRegisterBuffer(
   cudaGraphicsResource_t* resource,
   unsigned int buffer,
@@ -101,6 +111,8 @@ typedef struct {
   GLint alpha_location;
   GLint texture_location;
   cudaGraphicsResource_t resource;
+  cudaStream_t stream;
+  cudaEvent_t ready_event;
   int gl_ready;
 } FlowViewerHookState;
 
@@ -127,6 +139,8 @@ static FlowViewerHookState g_state = {
     .alpha_location = -1,
     .texture_location = -1,
     .resource = NULL,
+    .stream = NULL,
+    .ready_event = NULL,
     .gl_ready = 0,
 };
 
@@ -371,28 +385,58 @@ static int upload_texture_locked(void) {
   if (!cuda_ok(cudaSetDevice(g_state.device), "cudaSetDevice")) {
     return 0;
   }
-  if (!cuda_ok(cudaGraphicsMapResources(1, &g_state.resource, NULL), "cudaGraphicsMapResources")) {
+  // Use a dedicated non-blocking stream rather than the legacy default (NULL)
+  // stream: the default stream is process-global and any op on it fails with
+  // cudaErrorStreamCaptureImplicit (906) while another thread runs a CUDA graph
+  // capture (the whole-step graph runner), poisoning that capture. A
+  // non-blocking stream never creates that implicit dependency.
+  if (!g_state.stream) {
+    if (!cuda_ok(cudaStreamCreateWithFlags(&g_state.stream, CUDA_STREAM_NON_BLOCKING),
+                 "cudaStreamCreateWithFlags")) {
+      return 0;
+    }
+  }
+  if (!cuda_ok(cudaGraphicsMapResources(1, &g_state.resource, g_state.stream),
+               "cudaGraphicsMapResources")) {
     return 0;
   }
   if (!cuda_ok(cudaGraphicsResourceGetMappedPointer(&mapped_ptr, &mapped_size, g_state.resource),
                "cudaGraphicsResourceGetMappedPointer")) {
-    cudaGraphicsUnmapResources(1, &g_state.resource, NULL);
+    cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream);
     return 0;
   }
   if (mapped_size < num_bytes) {
-    cudaGraphicsUnmapResources(1, &g_state.resource, NULL);
+    cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream);
     return 0;
   }
-  if (!cuda_ok(cudaMemcpy(
+  // Order the copy after the producer (torch colormap) kernel: the sim thread
+  // records ready_event on its torch stream in lily_flow_viewer_hook_record_ready
+  // after writing the texture. A device-side stream-wait replaces the host sync
+  // the legacy NULL-stream cudaMemcpy used to provide implicitly.
+  if (g_state.ready_event) {
+    if (!cuda_ok(cudaStreamWaitEvent(g_state.stream, g_state.ready_event, 0),
+                 "cudaStreamWaitEvent")) {
+      cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream);
+      return 0;
+    }
+  }
+  if (!cuda_ok(cudaMemcpyAsync(
                mapped_ptr,
                (const void*)g_state.cuda_ptr,
                num_bytes,
-               CUDA_MEMCPY_DEVICE_TO_DEVICE),
-               "cudaMemcpy")) {
-    cudaGraphicsUnmapResources(1, &g_state.resource, NULL);
+               CUDA_MEMCPY_DEVICE_TO_DEVICE,
+               g_state.stream),
+               "cudaMemcpyAsync")) {
+    cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream);
     return 0;
   }
-  if (!cuda_ok(cudaGraphicsUnmapResources(1, &g_state.resource, NULL), "cudaGraphicsUnmapResources")) {
+  // No host sync needed after unmap: cudaGraphicsUnmapResources(stream)
+  // guarantees that all CUDA work issued into that stream before the unmap
+  // completes before any subsequently issued graphics work (the
+  // glTexSubImage2D below) touches the resource. The wait happens on the
+  // GPU queue, so the render thread never stalls on the copy.
+  if (!cuda_ok(cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream),
+               "cudaGraphicsUnmapResources")) {
     return 0;
   }
 
@@ -556,6 +600,30 @@ void lily_flow_viewer_hook_set_overlay(
   g_state.alpha = alpha;
   memcpy(g_state.plane_center, plane_center, 3 * sizeof(float));
   memcpy(g_state.plane_size, plane_size, 2 * sizeof(float));
+  pthread_mutex_unlock(&g_state.mutex);
+}
+
+__attribute__((visibility("default")))
+void lily_flow_viewer_hook_record_ready(void* producer_stream) {
+  // Called on the SIM thread right after the torch colormap kernel that
+  // writes the overlay texture, with that thread's current torch stream.
+  // Recording here (under the mutex) serialises against the render thread's
+  // cudaStreamWaitEvent, so record/wait never race on the event handle.
+  // NOTE: this runs on the sim thread sequentially with any CUDA graph
+  // capture (captures begin and end inside solver calls), so recording on
+  // the legacy default stream is safe — unlike the render thread, it can
+  // never be concurrent with a capture.
+  pthread_mutex_lock(&g_state.mutex);
+  if (!g_state.ready_event) {
+    if (!cuda_ok(cudaEventCreateWithFlags(&g_state.ready_event, CUDA_EVENT_DISABLE_TIMING),
+                 "cudaEventCreateWithFlags")) {
+      g_state.ready_event = NULL;
+      pthread_mutex_unlock(&g_state.mutex);
+      return;
+    }
+  }
+  cuda_ok(cudaEventRecord(g_state.ready_event, (cudaStream_t)producer_stream),
+          "cudaEventRecord");
   pthread_mutex_unlock(&g_state.mutex);
 }
 
@@ -725,6 +793,14 @@ class FlowViewerGLHook:
         self._lib.lily_flow_viewer_hook_set_overlay.restype = None
         self._lib.lily_flow_viewer_hook_clear.argtypes = []
         self._lib.lily_flow_viewer_hook_clear.restype = None
+        try:
+            self._lib.lily_flow_viewer_hook_record_ready.argtypes = [ctypes.c_void_p]
+            self._lib.lily_flow_viewer_hook_record_ready.restype = None
+            self._record_ready = self._lib.lily_flow_viewer_hook_record_ready
+        except AttributeError:
+            # Stale preloaded library without the ready-event export: fall back
+            # to unordered publish (pre-event behaviour).
+            self._record_ready = None
 
     def set_enabled(self, enabled: bool):
         self._lib.lily_flow_viewer_hook_set_enabled(1 if enabled else 0)
@@ -744,6 +820,13 @@ class FlowViewerGLHook:
             raise RuntimeError("FlowViewerGLHook requires a CUDA tensor.")
         if synchronize:
             torch.cuda.current_stream(texture_rgb.device).synchronize()
+        elif self._record_ready is not None:
+            # Sync-free ordering: record a ready-event on the producer (torch)
+            # stream; the hook's copy stream waits on it device-side before
+            # reading the texture, so neither the sim nor the render thread
+            # blocks on the host.
+            self._record_ready(ctypes.c_void_p(
+                torch.cuda.current_stream(texture_rgb.device).cuda_stream))
 
         center = np.asarray(plane_center, dtype=np.float32)
         size_xy = np.asarray(plane_size, dtype=np.float32)

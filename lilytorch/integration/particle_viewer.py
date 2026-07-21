@@ -1022,15 +1022,12 @@ class ParticleViewer(TaskExtension):
         self._dtype = fs.dtype
         self._ndim = 3 if fs.z is not None else 2
 
-        from lilytorch.src.kernels import (
-            RegularGridInterpolator,
-            RegularGridInterpolator3D,
-        )
+        from lilytorch.src.native import RegularGridInterpolator
 
         if self._ndim == 3:
             coords = (fs.x, fs.y, fs.z)
             shape = fs.grid_shape
-            Interp = RegularGridInterpolator3D
+            Interp = RegularGridInterpolator
         else:
             coords = (fs.x, fs.y)
             shape = (len(fs.x), len(fs.y))

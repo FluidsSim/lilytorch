@@ -293,7 +293,7 @@ Hardware
      - ``"float32"`` or ``"float64"``.  Honoured by both the
        pure-PyTorch path and the C++/CUDA streaming kernels (which
        dispatch via ``AT_DISPATCH_FLOATING_TYPES``).  Set on the
-       :class:`~lilytorch.farms_examples.base_sim_config.BaseSimConfig`
+       :class:`~lilytorch.examples.base_sim_config.BaseSimConfig`
        — the value flows through to :class:`FluidSolver` and
        :class:`BDIMhandler` automatically; passing
        ``dtype=torch.float64`` to ``FluidSolver(...)`` directly is no
