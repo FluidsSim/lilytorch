@@ -54,7 +54,7 @@ dev = [
 petsc = ["petsc4py", "mpi4py"]
 
 [project.urls]
-Repository = "https://github.com/ferrarioa5/lilytorch"
+Repository = "https://github.com/FluidsSim/lilytorch"
 
 [tool.setuptools.packages.find]
 include = ["lilytorch*"]
