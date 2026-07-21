@@ -16,7 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 plt.rcParams['font.size'] = '20'
 
-RUN_DIR = os.path.join(save_path, "2026-06-30T00:03:11.915483")
+RUN_DIR = os.path.join(save_path, "2026-07-21T11:42:35.898874")
 
 # RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T15:46:57.285611")
 SIMULATION_PATH = os.path.join(RUN_DIR, "output", "simulation.hdf5")

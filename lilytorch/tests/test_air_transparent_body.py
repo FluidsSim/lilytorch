@@ -180,7 +180,7 @@ class TestAirTransparentBodyFormula:
             for rho_f in [1.2, 500.5, 1000.0]:
                 c_legacy = dt * mu0 / rho_f
                 # When alpha is not applied (atb=False), c = c_legacy
-                # This is what _compute_bdim_coefficients does when atb=False
+                # (same formula used by _rescale_kernel_coeffs_two_phase when atb=False)
                 assert abs(c_legacy - dt * mu0 / rho_f) < 1e-15
 
 

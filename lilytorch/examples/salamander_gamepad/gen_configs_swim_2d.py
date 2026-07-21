@@ -24,7 +24,6 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf    = True
         self.stack_folder   = "salamander"
 
-        self.solver_method    = "kernel"
 
         self.bdim_physics = {"solref": [-50000.0, -500.0]}
 
@@ -64,21 +63,21 @@ class SimConfig(BaseSimConfig):
 
 
 
-        self.force_method         = "eulerian"
-        self.force_relaxation     = 0.05
+        self.force_method             = "eulerian"
+        # self.force_relaxation         = 0.05
         self.zero_pressure_inside     = False
         self.bdim_mu0_projection      = False
-        self.bdim_body_div_correction = True
+        self.bdim_body_div_correction = False
         # self.body_velocity_blend_eps_cells = 2
         # self.lagrangian_sample_offset = 2*(self.xmax - self.xmin) / self.Nx
 
-        # self.coupling = {
-        #     "scheme": "implicit",
-        #     "accelerator": "iqn-ils",   # or "aitken" / "constant"
-        #     "reuse": 2,
-        #     "tol": 1e-4,
-        #     "max_iter": 30,
-        # }
+        self.coupling = {
+            "scheme": "implicit",
+            "accelerator": "iqn-ils",   # or "aitken" / "constant"
+            "reuse": 2,
+            "tol": 1e-4,
+            "max_iter": 30,
+        }
 
 
         # ── MuJoCo ───────────────────────────────────────────────────

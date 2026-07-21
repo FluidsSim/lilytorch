@@ -22,16 +22,8 @@ __all__ = [
     "interp_3d",
     "lagrangian_forces_2d",
     "lagrangian_forces_3d",
-    "rbgs_sweep_2d",
     "rbgs_sweep_3d",
     "mg_residual_2d",
-    "mg_residual_3d",
-    "restrict_residual_2d",
-    "restrict_residual_3d",
-    "restrict_face_2d",
-    "restrict_face_3d",
-    "prolongate_add_2d",
-    "prolongate_add_3d",
     "poisson_solve_multigrid_2d",
     "poisson_solve_multigrid_3d",
     "poisson_solve_mgcg_2d",
@@ -43,8 +35,6 @@ __all__ = [
     "body_update_2d",
     "body_update_3d",
     "RegularGridInterpolator",
-    "RegularGridInterpolator3D",
-    "RegularGridInterpolatorAutomatic",
 ]
 _METHOD_MAP = {"linear": 0, "quadratic": 1}
 
@@ -644,33 +634,8 @@ def apply_bcs_2d(
 
 
 # =====================================================================
-# Multigrid RBGS smoother kernels
+# Multigrid RBGS smoother kernel
 # =====================================================================
-
-def rbgs_sweep_2d(
-        p: Tensor,
-        f: Tensor,
-        cp0: Tensor, cm0: Tensor,
-        cp1: Tensor, cm1: Tensor,
-        jcap_tol: float,
-        nsmoothing: int) -> None:
-    """Tiled 2-D RBGS smoother: ``nsmoothing`` full sweeps in one CUDA call.
-
-    Mutates ``p`` (shape ``(Nx+2, Ny+2)``) in place.  Applies Neumann BCs
-    on ghost rows before and after the sweeps.  ``f``, ``cp0``, ``cm0``,
-    ``cp1``, ``cm1`` are the interior-cell RHS and face coefficients, all
-    of shape ``(Nx, Ny)``.
-    """
-    # Coefficient arrays may arrive as non-contiguous slices (e.g. strides
-    # from a ghost-padded grid).  The CUDA kernel assumes C-contiguous layout,
-    # so materialise them here before dispatch.
-    torch.ops.lilytorch_kernels.rbgs_sweep_2d.default(
-        p, f,
-        cp0.contiguous(), cm0.contiguous(),
-        cp1.contiguous(), cm1.contiguous(),
-        float(jcap_tol), int(nsmoothing),
-    )
-
 
 def rbgs_sweep_3d(
         p: Tensor,
@@ -701,39 +666,10 @@ def rbgs_sweep_3d(
 # without executing CUDA.  Both ops return () and mutate p in place, so
 # the abstract implementation is a no-op.
 
-@torch.library.register_fake("lilytorch_kernels::rbgs_sweep_2d")
-def _rbgs_sweep_2d_abstract(p, f, cp0, cm0, cp1, cm1,
-                              jcap_tol, nsmoothing):
-    pass   # p is mutated in place; no new tensors created
-
-
 @torch.library.register_fake("lilytorch_kernels::rbgs_sweep_3d")
 def _rbgs_sweep_3d_abstract(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
                               jcap_tol, nsmoothing):
     pass   # p is mutated in place; no new tensors created
-
-
-def jacobi_sweep_2d(
-        p: Tensor,
-        f: Tensor,
-        cp0: Tensor, cm0: Tensor,
-        cp1: Tensor, cm1: Tensor,
-        jcap_tol: float,
-        w: float,
-        nsmoothing: int) -> None:
-    """Tiled 2-D weighted Jacobi smoother: ``nsmoothing`` sweeps in one CUDA call.
-
-    Mutates ``p`` (shape ``(Nx+2, Ny+2)``) in place.  Applies Neumann BCs
-    on ghost rows before and after the sweeps.  ``f``, ``cp0``, ``cm0``,
-    ``cp1``, ``cm1`` are the interior-cell RHS and face coefficients, all
-    of shape ``(Nx, Ny)``.  ``w`` is the relaxation weight (1.0 = plain Jacobi).
-    """
-    torch.ops.lilytorch_kernels.jacobi_sweep_2d.default(
-        p, f,
-        cp0.contiguous(), cm0.contiguous(),
-        cp1.contiguous(), cm1.contiguous(),
-        float(jcap_tol), float(w), int(nsmoothing),
-    )
 
 
 def jacobi_sweep_3d(
@@ -758,12 +694,6 @@ def jacobi_sweep_3d(
         cp2.contiguous(), cm2.contiguous(),
         float(jcap_tol), float(w), int(nsmoothing),
     )
-
-
-@torch.library.register_fake("lilytorch_kernels::jacobi_sweep_2d")
-def _jacobi_sweep_2d_abstract(p, f, cp0, cm0, cp1, cm1,
-                                jcap_tol, w, nsmoothing):
-    pass   # p is mutated in place; no new tensors created
 
 
 @torch.library.register_fake("lilytorch_kernels::jacobi_sweep_3d")
@@ -811,98 +741,9 @@ def mg_residual_2d(
     return r
 
 
-def mg_residual_3d(
-        p: Tensor,
-        f: Tensor,
-        cp0: Tensor, cm0: Tensor,
-        cp1: Tensor, cm1: Tensor,
-        cp2: Tensor, cm2: Tensor,
-        jcap_tol: float) -> Tensor:
-    """3-D analogue of :func:`mg_residual_2d`.
-
-    ``p`` is ghost-padded ``(Nx+2, Ny+2, Nz+2)``; ``f`` and all coefficient
-    tensors are interior-shape ``(Nx, Ny, Nz)``.  Returns ``r`` of shape
-    ``(Nx, Ny, Nz)`` without ever allocating ``J`` or ``active`` globally.
-    """
-    r = torch.empty_like(f)
-    torch.ops.lilytorch_kernels.mg_residual_3d.default(
-        p, f,
-        cp0.contiguous(), cm0.contiguous(),
-        cp1.contiguous(), cm1.contiguous(),
-        cp2.contiguous(), cm2.contiguous(),
-        float(jcap_tol), r,
-    )
-    return r
-
-
 @torch.library.register_fake("lilytorch_kernels::mg_residual_2d")
 def _mg_residual_2d_abstract(p, f, cp0, cm0, cp1, cm1, jcap_tol, r):
     pass   # r is filled in place; no new tensors created
-
-
-@torch.library.register_fake("lilytorch_kernels::mg_residual_3d")
-def _mg_residual_3d_abstract(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
-                              jcap_tol, r):
-    pass   # r is filled in place; no new tensors created
-
-
-# =====================================================================
-# Multigrid grid-transfer kernels (restriction + prolongation)
-# =====================================================================
-
-def restrict_residual_2d(r: Tensor, rc: Tensor) -> None:
-    """Sum-of-4-children residual restriction (2-D), bit-exact with the
-    PyTorch slicing chain used in poisson_mult._restrict_residual_2d."""
-    torch.ops.lilytorch_kernels.restrict_residual_2d.default(r.contiguous(), rc)
-
-
-def restrict_residual_3d(r: Tensor, rc: Tensor) -> None:
-    """Sum-of-8-children residual restriction (3-D)."""
-    torch.ops.lilytorch_kernels.restrict_residual_3d.default(r.contiguous(), rc)
-
-
-def restrict_face_2d(src: Tensor, dst: Tensor, face_dim: int) -> None:
-    """WaterLily face restriction (2-D): stride-2 in ``face_dim``,
-    sum-of-pairs in transverse, single 0.5 factor."""
-    torch.ops.lilytorch_kernels.restrict_face_2d.default(
-        src.contiguous(), dst, int(face_dim))
-
-
-def restrict_face_3d(src: Tensor, dst: Tensor, face_dim: int) -> None:
-    """WaterLily face restriction (3-D)."""
-    torch.ops.lilytorch_kernels.restrict_face_3d.default(
-        src.contiguous(), dst, int(face_dim))
-
-
-def prolongate_add_2d(ec: Tensor, p: Tensor) -> None:
-    """Bilinear (align_corners=False) prolongation of ec[interior]
-    added in place into p[interior].  Both tensors are ghost-padded
-    ``(N+2, N+2)``."""
-    torch.ops.lilytorch_kernels.prolongate_add_2d.default(ec.contiguous(), p)
-
-
-def prolongate_add_3d(ec: Tensor, p: Tensor) -> None:
-    """Trilinear prolongation + in-place add (3-D)."""
-    torch.ops.lilytorch_kernels.prolongate_add_3d.default(ec.contiguous(), p)
-
-
-@torch.library.register_fake("lilytorch_kernels::restrict_residual_2d")
-def _restrict_residual_2d_abstract(r, rc): pass
-
-@torch.library.register_fake("lilytorch_kernels::restrict_residual_3d")
-def _restrict_residual_3d_abstract(r, rc): pass
-
-@torch.library.register_fake("lilytorch_kernels::restrict_face_2d")
-def _restrict_face_2d_abstract(src, dst, face_dim): pass
-
-@torch.library.register_fake("lilytorch_kernels::restrict_face_3d")
-def _restrict_face_3d_abstract(src, dst, face_dim): pass
-
-@torch.library.register_fake("lilytorch_kernels::prolongate_add_2d")
-def _prolongate_add_2d_abstract(ec, p): pass
-
-@torch.library.register_fake("lilytorch_kernels::prolongate_add_3d")
-def _prolongate_add_3d_abstract(ec, p): pass
 
 
 # =====================================================================
@@ -1347,7 +1188,6 @@ def body_update_2d(
     interp_method,
     dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
     blend_eps=0.0,
-    use_graph=False,  # ignored — native eager only for now
 ):
     """Native 2-D streaming SDF body update (eager path).
 
@@ -1376,7 +1216,6 @@ def body_update_3d(
     dirty_i0, dirty_j0, dirty_k0,
     dirty_Ai, dirty_Aj, dirty_Ak,
     blend_eps=0.0,
-    use_graph=False,  # ignored — native eager only for now
 ):
     """Native 3-D streaming SDF body update (eager path).  See 2-D."""
     if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
@@ -1395,11 +1234,3 @@ def body_update_3d(
     )
 
 
-# ---------------------------------------------------------------------------
-# Aliases — same class handles 2-D and 3-D; "Automatic" / "3D" suffixes are
-# kept for backward-compatible imports from sites that used to import them
-# from pytorch_interpolation.
-# ---------------------------------------------------------------------------
-
-RegularGridInterpolatorAutomatic = RegularGridInterpolator
-RegularGridInterpolator3D        = RegularGridInterpolator

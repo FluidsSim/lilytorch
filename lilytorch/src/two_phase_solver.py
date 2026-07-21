@@ -13,17 +13,14 @@ FARMS coupling) runs through the untouched base solver byte-for-byte. The
 overrides are:
 
 * ``__init__`` — build the :class:`~lilytorch.src.two_phase.TwoPhase` field.
-* ``_compute_bdim_coefficients`` / ``_apply_bdim_all_axes`` — **python
-  path**: projection coefficients
-  ``c = dt·μ0_eff·(1/ρ)_fluid`` from the VOF water/air density (Weymouth &
-  Yue 2011, ``(1−δ^B)/ρ``; the body enters via ``μ0`` only, never its
-  density) and the air-transparent mu0/mu1 masking of the velocity BDIM.
+* ``_apply_bdim_all_axes`` — air-transparent mu0/mu1 masking of the
+  velocity BDIM (python path).
 * ``project`` — **fused path** (the default): between the fused single-phase
   bdim_apply and the Poisson solve, repair the velocity with the exact
   air-transparent identity ``a·S + (1−a)·u′`` (u′ captured by wrapping
   ``adv_diff_solver.solve``) and rescale the kernel's water-normalised
-  coefficients to the two-phase formulas. No CUDA or solver.py changes;
-  both paths solve the identical Poisson.
+  coefficients to the two-phase formulas via
+  ``_rescale_kernel_coeffs_two_phase``. No CUDA or solver.py changes.
 * ``finalize_step`` — transport the VOF field once per step.
 * ``forces_method2`` / ``forces_method2_3d`` — stack per-body SDFs so the
   emergent (real-pressure) eulerian force loop sees them.
@@ -397,73 +394,6 @@ class TwoPhaseSolver(FluidSolver):
     # well-balanced p_rgh solve (cleaner dynamic pressure, fewer parasitic
     # interface currents) is a separate follow-up.
 
-    # ------------------------------------------------------------------
-    #  Override: density-based projection coefficients
-    # ------------------------------------------------------------------
-    def _compute_bdim_coefficients(self, timestep):
-        """BDIM2 two-phase projection coefficients ``c = dt·μ0_eff / ρ_fluid`` on
-        each staggered face (Python path).
-
-        This is the Weymouth & Yue (2011) form (Eqs 24a/26a): the Poisson
-        coefficient is ``(1−δ^B)/ρ`` with ``(1−δ^B) = μ0_eff`` the fluid fraction
-        and ``ρ`` the **fluid** density — here the water/air VOF blend. We carry
-        the reciprocal directly, ``c = dt·μ0_eff·(1/ρ)_face`` with ``(1/ρ)_face``
-        the harmonic face density's reciprocal (``recip_density_face``, their Eq
-        33), avoiding the dimensional density field and a separate harmonic blend.
-
-        With ``air_transparent_body`` (default ON), μ0_eff = 1 − α·(1−μ0):
-        the body is transparent in the air phase, eliminating the water-air-body
-        triple-point singularity.  In water (α=1) μ0_eff = μ0 (normal BDIM); in
-        air (α=0) μ0_eff = 1 (body invisible, air flows freely).
-
-        The trailing ``ch_cc`` entry is the FFT RHS divisor, which two-phase
-        never uses (the FFT path is forbidden; the MGCG path ignores it). It is
-        returned as ``None`` to skip an unused full-grid allocation, keeping the
-        ``(ch, cv[, cw], ch_cc)`` tuple shape ``fluid_step`` expects.
-        """
-        tp  = self.two_phase
-        dt  = float(timestep)
-        rs  = self._rho_solid
-        atb = self._air_transparent_body
-        # Fluid-part water fraction: with the alpha_exclude_body carve the raw
-        # alpha under-counts water in the wetted BDIM band (body volume is
-        # missing from it) -> light shell -> spurious buoyant plumes.  Both the
-        # density blend and the transparency mask must see the fluid-part
-        # fraction.  Identity when the carve is off (see _alpha_fluid_cc).
-        a_f = self._alpha_fluid_cc()
-        recip_cc = 1.0 / (a_f * tp.rho_water + (1.0 - a_f) * tp.rho_air)
-        out = []
-        for d, ax in enumerate(self._bdim_axis_names):       # 'u','v'[,'w']
-            recip_face = self._face_mean(recip_cc, d)        # (1/ρ) water/air blend
-            mu0 = getattr(self, f'mu0_all_{ax}')             # (1−δ^B), fluid fraction
-            if atb:
-                # Air-transparent body: mu0_eff = 1 - alpha_face*(1 - mu0)
-                # = alpha_face*mu0 + (1-alpha_face). Body invisible in air.
-                a_face = self._face_mean(a_f, d)
-                mu0_t = a_face * mu0 + (1.0 - a_face)
-                if self._alpha_exclude_body:
-                    # Carved init: the body interior is alpha=0 (dry), so the
-                    # alpha proxy can no longer distinguish "above the free
-                    # surface" from "inside the hull" — unrestricted it would
-                    # make the body transparent in its own interior and let
-                    # water flow through the wetted hull. Gate on the face SDF:
-                    # transparency only OUTSIDE the body, plain mu0 inside.
-                    sdf_face = getattr(self.composite_body, f"sdf_val_{ax}")
-                    mu0_t = torch.where(sdf_face >= 0.0, mu0_t, mu0)
-                mu0 = mu0_t
-            if rs is not None:
-                # THREE-PHASE: body included as density rho_solid (Nangia Eq. 23),
-                # c = dt / (mu0*rho_flow + (1-mu0)*rho_solid). No mu0 exclusion ->
-                # the body carries a finite density at the waterline band.
-                rho_flow_face = 1.0 / recip_face
-                rho_3 = mu0 * rho_flow_face + (1.0 - mu0) * rs
-                out.append(dt / rho_3)
-            else:
-                # current: body EXCLUDED (c -> 0 inside body, preserves BDIM vel)
-                out.append(dt * mu0 * recip_face)
-        out.append(None)                                     # ch_cc: unused (no FFT)
-        return tuple(out)
-
     def _alpha_face(self, d):
         """Water fraction ``alpha`` on the staggered *d*-face grid (full grid;
         see :meth:`_face_mean`)."""
@@ -566,12 +496,11 @@ class TwoPhaseSolver(FluidSolver):
     #
     # 2. COEFFICIENT.  ``mu0 = c_kernel * rho_water/dt`` recovers the fluid
     #    fraction from the kernel coefficient (requires bdim_mu0_projection,
-    #    enforced at init), after which the python-path formulas of
-    #    ``_compute_bdim_coefficients`` (standard / rho_solid three-phase,
-    #    with the air-transparent masking and the carved-init gate)
-    #    are evaluated directly on the face grids.  Out-of-place: the
-    #    persistent ``_ch_persist`` buffers must stay water-normalised for
-    #    the next step's Kernel-B overwrite.
+    #    enforced at init), after which the two-phase formulas (standard /
+    #    rho_solid three-phase, with the air-transparent masking and the
+    #    carved-init gate) are evaluated directly on the face grids.
+    #    Out-of-place: the persistent ``_ch_persist`` buffers must stay
+    #    water-normalised for the next step's Kernel-B overwrite.
     #
     # Both fixes run inside ``project`` (between BDIM and the Poisson solve —
     # after the projection would be too late, the wrong velocity would
@@ -643,8 +572,7 @@ class TwoPhaseSolver(FluidSolver):
 
     def _rescale_kernel_coeffs_two_phase(self, coeffs):
         """Return fresh two-phase Poisson coefficients from the kernel's
-        water-normalised ``c_kernel = dt*mu0/rho_water`` ones, evaluating the
-        same per-mode formulas as ``_compute_bdim_coefficients``.
+        water-normalised ``c_kernel = dt*mu0/rho_water`` ones.
 
         When ``bdim_mu0_projection`` is True the fluid fraction μ₀ is recovered
         directly from the kernel coefficient (zero extra cost).  When False the

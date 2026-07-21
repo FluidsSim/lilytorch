@@ -289,7 +289,6 @@ def instrument_handler(handler):
     handler.step = types.MethodType(outer_step, handler)
 
     _orig_project = type(fs).project
-    _orig_vardens = type(fs)._compute_bdim_coefficients
     poisson_mg = getattr(fs, "poisson_solver", None)
 
     def _install_deep_patches():
@@ -338,12 +337,6 @@ def instrument_handler(handler):
                 return _orig_set_bcs_fn(self_adv, *call_args, **call_kwargs)
 
         adv.set_BCs = types.MethodType(timed_set_bcs, adv)
-
-        def timed_vardens(self_fs, *call_args, **call_kwargs):
-            with T(spec.vardens_leaf_label):
-                return _orig_vardens(self_fs, *call_args, **call_kwargs)
-
-        fs._compute_bdim_coefficients = types.MethodType(timed_vardens, fs)
 
         _orig_release = type(fs)._release_bdim_fields
 
