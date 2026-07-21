@@ -137,8 +137,8 @@ class SimConfig(BaseSimConfig):
         # buoyancy inside the same extension as drag, so keep both enabled.
         self.wall_thickness = 0.01
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
-        self.water_drag     = True
-        self.water_buoyancy = True
+        self.water_drag     = False
+        self.water_buoyancy = False
 
         # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                 = self.timestep

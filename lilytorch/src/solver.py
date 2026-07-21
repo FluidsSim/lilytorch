@@ -762,6 +762,14 @@ class FluidSolver(PlottingMixin):
             self.poisson_solver.cg_check_every = int(
                 solver.get("poisson_cg_check_every", 1))
 
+        # Persistent BDIM Poisson-coefficient buffers (ch/cv[/cw]).
+        # Allocated once at construction; the fused bdim_apply kernel
+        # overwrites only the dirty AABB sub-block each step.
+        if self.ndim == 3:
+            self._init_bdim_coeff_persist_3d(self.dt)
+        else:
+            self._init_bdim_coeff_persist_2d(self.dt)
+
     # =====================================================================
     # Gravity body force (opt-in)
     # =====================================================================
@@ -1838,11 +1846,6 @@ class FluidSolver(PlottingMixin):
         else:
             _nu_eff = None
 
-        # Init persistent BDIM coefficient buffers (fallback for standalone
-        # runs; BDIMhandler normally allocates these before the fluid step).
-        if getattr(self, '_ch_persist', None) is None:
-            self._init_bdim_coeff_persist_2d(timestep)
-
         # ── Core pre-projection operations (always the same) ─────
         # advection + diffusion + BDIM forcing + set_BCs — all native.
         # The runner dispatches to either graph replay or eager launch.
@@ -1991,11 +1994,6 @@ class FluidSolver(PlottingMixin):
             _nu_eff = self._nu_eff_graph
         else:
             _nu_eff = None
-
-        # Init persistent BDIM coefficient buffers (fallback for standalone
-        # runs; BDIMhandler normally allocates these before the fluid step).
-        if getattr(self, '_ch_persist', None) is None:
-            self._init_bdim_coeff_persist_3d(timestep)
 
         # ── Core pre-projection operations (always the same) ─────
         # advection + diffusion + BDIM forcing + set_BCs — all native.
