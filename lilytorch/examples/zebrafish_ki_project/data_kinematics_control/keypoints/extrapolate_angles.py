@@ -86,11 +86,26 @@ def compute_coordinates_from_arc_lengths(
     y_min = spline_y(s_min)
     y_max = spline_y(s_max)
 
-    # Endpoint slopes
-    dx_min = spline_x(s_min, 1)
-    dx_max = spline_x(s_max, 1)
-    dy_min = spline_y(s_min, 1)
-    dy_max = spline_y(s_max, 1)
+    # Extrapolation direction = terminal CHORD of the tracked keypoints,
+    # NOT the spline endpoint tangent. The not-a-knot spline's endpoint
+    # tangent carries spurious end-curvature; extended into the untracked
+    # head/tail it injected a systematic net body curvature (~-3.6 deg on
+    # the ep248 slow clip) absent from the raw keypoints (-3.9 deg raw ->
+    # -6.2 deg extracted). Extending along the terminal chord keeps the
+    # head/tail collinear with the real body and reproduces the tracked net
+    # curvature exactly (chord-extrap -> -3.90 deg = raw), which stops the
+    # PD-driven free swimmer from turning on a phantom curvature bias. The
+    # spline endpoint SPEED (arc-length rate) is kept so arc spacing is
+    # preserved; only the direction changes.
+    speed_min = np.hypot(spline_x(s_min, 1), spline_y(s_min, 1))
+    speed_max = np.hypot(spline_x(s_max, 1), spline_y(s_max, 1))
+
+    chord_min = np.array([points_pos_x[1] - points_pos_x[0],
+                          points_pos_y[1] - points_pos_y[0]])
+    chord_min = chord_min / np.linalg.norm(chord_min)
+    chord_max = np.array([points_pos_x[-1] - points_pos_x[-2],
+                          points_pos_y[-1] - points_pos_y[-2]])
+    chord_max = chord_max / np.linalg.norm(chord_max)
 
     # Target points
     n_target     = len(target_arclen)
@@ -100,12 +115,12 @@ def compute_coordinates_from_arc_lengths(
     for i, s in enumerate(target_arclen):
 
         if s < s_min:
-            x = x_min + dx_min * (s - s_min)
-            y = y_min + dy_min * (s - s_min)
+            x = x_min + chord_min[0] * speed_min * (s - s_min)
+            y = y_min + chord_min[1] * speed_min * (s - s_min)
 
         elif s > s_max:
-            x = x_max + dx_max * (s - s_max)
-            y = y_max + dy_max * (s - s_max)
+            x = x_max + chord_max[0] * speed_max * (s - s_max)
+            y = y_max + chord_max[1] * speed_max * (s - s_max)
 
         else:
             x = spline_x(s)

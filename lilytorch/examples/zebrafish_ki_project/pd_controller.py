@@ -106,6 +106,119 @@ class PositionController(KinematicsController):
                 for j in range(kinematics.shape[1])
             ])
 
+        # ── Reference pre-emphasis (feedforward gain) ────────────────
+        # The over-damped position servo realizes only ~86-95% of the
+        # commanded joint amplitude (a near-uniform per-joint attenuation).
+        # Multiplying the reference by 1/tracking_ratio makes the *realized*
+        # angles match the intended trajectory without stiffening the servo
+        # (which blows up). Scalar or per-joint list; default 1.0 (no-op).
+        ref_gain = config.get("reference_gain", 1.0)
+        if np.ndim(ref_gain) == 0:
+            if ref_gain != 1.0:
+                kinematics = kinematics * ref_gain
+        else:
+            ref_gain = np.asarray(ref_gain, dtype=float)
+            if ref_gain.shape[0] != kinematics.shape[1]:
+                raise ValueError(
+                    f"reference_gain has {ref_gain.shape[0]} entries but there "
+                    f"are {kinematics.shape[1]} joints."
+                )
+            kinematics = kinematics * ref_gain[None, :]
+
+        # ── Servo pre-emphasis (FREQUENCY-DEPENDENT feedforward) ─────
+        # The scalar reference_gain above corrects the fundamental but NOT the
+        # harmonics, because the position servo is not a flat attenuator: it is
+        # a first-order lag with a corner at kp/kv.  Measured on ep248 slow
+        # (kp=0.2, kv=0.001 -> kp/kv = 200 rad/s = 31.8 Hz), the realized/
+        # commanded joint-angle ratio per tail-beat harmonic is
+        #
+        #     1f0 (16.4 Hz) 0.892 | 2f0 (32.7) 0.707 | 3f0 (49.1) 0.550 | 4f0 (65.5) 0.434
+        #
+        # and fitting |H| = 1/sqrt(1+(f/fc)^2) to each harmonic INDEPENDENTLY
+        # returns fc = 32.3 / 32.7 / 32.3 / 31.5 Hz — i.e. the plant really is
+        # first order with the corner at exactly kp/kv (the 0.707 at 2f0 is the
+        # textbook -3 dB point).  A scalar 1.15x gain leaves 2f0/3f0/4f0 at
+        # 0.829/0.646/0.512, which is the body-wave HARMONIC DEFICIT.
+        #
+        # Since the plant is known analytically, invert its MAGNITUDE:
+        #
+        #     boost(f) = min( sqrt(1 + (f/fc)^2), servo_preemphasis_cap )
+        #
+        # applied zero-phase in the frequency domain.  Two deliberate choices:
+        #
+        #   * MAGNITUDE ONLY, zero phase.  The textbook lead H^-1(s) = 1+s/wc
+        #     also corrects phase, but in the time domain that is
+        #     ref + (1/wc)*d(ref)/dt — an UNBOUNDED high-pass whose own second
+        #     derivative is the reference's third.  Tried it: the run died at
+        #     ~iter 450 with mjWARN_BADQACC at the tail DOFs.  The servo lag is
+        #     ~2.5 ms and near-uniform across joints, so it costs amplitude,
+        #     not shape — correcting magnitude alone is what is needed here.
+        #   * CAPPED.  Without a cap the boost grows without limit and
+        #     amplifies the residual >100 Hz content that ``lowpass_cutoff``
+        #     (8th-order effective) does not fully remove.  The cap must exceed
+        #     the 4f0 requirement (2.29) to leave the harmonics of interest
+        #     untouched; default 2.5 does, and flattens everything above
+        #     ~72 Hz instead of amplifying it.
+        #
+        # This is FEEDFORWARD: it changes the commanded trajectory, not the
+        # closed-loop gains, so unlike raising kp it does not move the poles.
+        # Set ``servo_corner_hz`` to kp/(2*pi*kv); default None = off.  Use
+        # INSTEAD of reference_gain, not with it — the correction already
+        # returns the fundamental to unity (0.892 * 1.125 = 1.00).
+        #
+        # ``servo_preemphasis_joints`` restricts the correction to a subset of
+        # joints.  The posterior DOFs have ~1e-13 kg m^2 of inertia and no
+        # armature (FARMS does not plumb it), so they are the ones that throw
+        # mjWARN_BADQACC when the commanded high-frequency content grows; on
+        # ep248 the all-joint correction died at iter 579 (cap 2.5) / 820
+        # (cap 1.5).  Excluding them buys a stable run at the cost of leaving
+        # the tail's own harmonics uncorrected.
+        servo_corner_hz = config.get("servo_corner_hz", None)
+        if servo_corner_hz is not None and servo_corner_hz > 0:
+            cap = config.get("servo_preemphasis_cap", 2.5)
+            pre_joints = config.get("servo_preemphasis_joints", None)
+            if pre_joints is None:
+                pre_joints = np.arange(kinematics.shape[1])
+            pre_joints = np.asarray(pre_joints, dtype=int)
+            uncorrected = kinematics.copy()
+            n_k = kinematics.shape[0]
+            pad = n_k // 2
+            # reflect-pad so the FFT does not ring against a step at the ends
+            padded = np.pad(kinematics, ((pad, pad), (0, 0)), mode="reflect")
+            freqs = np.fft.rfftfreq(padded.shape[0], kinematics_sampling)
+            boost = np.minimum(
+                np.sqrt(1.0 + (freqs / servo_corner_hz) ** 2), cap,
+            )
+            padded = np.fft.irfft(
+                np.fft.rfft(padded, axis=0) * boost[:, None],
+                padded.shape[0], axis=0,
+            )
+            kinematics = uncorrected
+            kinematics[:, pre_joints] = padded[pad:pad + n_k][:, pre_joints]
+
+        # ── Straight-swim de-biasing (remove net gait curvature) ─────
+        # The extracted ep248 gait carries a small non-zero per-joint
+        # time-mean (net body curvature ~-3.9 deg). Over ~9 tail beats this
+        # mean is within ~1 SE of zero (mean/SE ~ -0.28): it is the residual
+        # of a symmetric oscillation, not a real steady turning command — the
+        # real fish swam straight with it. But the sim body is open-loop
+        # (no fins, no heading hold), so it integrates that residual bias into
+        # a spurious net turn (~+50 deg). Subtracting each joint's time-mean
+        # makes the mean posture perfectly straight (0 deg net curvature)
+        # while preserving the full oscillation. Default off (no-op); enable
+        # with debias_reference: true (per-joint) — set "net" to only remove
+        # the summed net curvature, spread equally across joints.
+        debias = config.get("debias_reference", False)
+        if debias:
+            joint_means = kinematics.mean(axis=0)
+            if isinstance(debias, str) and debias.lower() == "net":
+                # Zero only the net curvature (sum of joint means), spread
+                # uniformly, keeping any per-joint mean camber otherwise.
+                kinematics = kinematics - joint_means.sum() / kinematics.shape[1]
+            else:
+                # Per-joint demean: straight mean posture at every joint.
+                kinematics = kinematics - joint_means[None, :]
+
         # ── Optional kinematics plot (before zero-row prepend) ───────
         if config.get("plot_kinematics", False):
             self._plot_kinematics(

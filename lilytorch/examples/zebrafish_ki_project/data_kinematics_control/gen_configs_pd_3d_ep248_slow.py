@@ -52,13 +52,13 @@ class SimConfig(BaseSimConfig):
         self.use_bdim                      = True
         self.headless                      = False
         self.water_buoyancy                = True
-        self.sdf_interp_method             = "triquadratic"
+        # self.sdf_interp_method             = "triquadratic"
         self.force_method                  = "lagrangian"
         self.convexify                     = False
         self.zero_pressure_inside          = False
-        self.body_velocity_blend_eps_cells = 2
+        # self.body_velocity_blend_eps_cells = 2
         self.bdim_mu0_projection           = False
-        self.bdim_body_div_correction      = True
+        self.bdim_body_div_correction      = False
 
         # Wall contact (mass-independent solref for stability).
         self.bdim_physics = {
@@ -78,8 +78,8 @@ class SimConfig(BaseSimConfig):
                     "data_folder"      : self.data_folder,
                     "file_path"        : "ep248_Cl2_slow_fish13_model_angles.xlsx",
                     "kinematics_invert": False,
-                    "lowpass_cutoff"   : 30,
-                    "plot_kinematics"  : False,
+                    "lowpass_cutoff"   : 100,
+                    "plot_kinematics"  : True,
                 },
                 "gains"     : [0.2, 0.001, 0],
                 "spawn_mode": SpawnMode.TRANSVERSE,
