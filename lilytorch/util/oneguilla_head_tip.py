@@ -58,10 +58,11 @@ def _compute_head_tip_proxy(link_array: np.ndarray, head_idx: int) -> np.ndarray
     return head_pos + 0.5 * (head_pos - neighbor_pos)
 
 
-@lru_cache(maxsize=1)
-def load_1guilla_head_tip_local_point() -> np.ndarray:
+@lru_cache(maxsize=4)
+def load_1guilla_head_tip_local_point(head_mesh_path: str | None = None) -> np.ndarray:
+    mesh_path = Path(head_mesh_path) if head_mesh_path else _HEAD_VISUAL_MESH_PATH
     vertices: list[tuple[float, float, float]] = []
-    with _HEAD_VISUAL_MESH_PATH.open("r", encoding="utf-8") as mesh_file:
+    with mesh_path.open("r", encoding="utf-8") as mesh_file:
         for line in mesh_file:
             if not line.startswith("v "):
                 continue
@@ -69,7 +70,7 @@ def load_1guilla_head_tip_local_point() -> np.ndarray:
             vertices.append((float(x_coord), float(y_coord), float(z_coord)))
 
     if not vertices:
-        raise ValueError(f"No vertices found in head mesh: {_HEAD_VISUAL_MESH_PATH}")
+        raise ValueError(f"No vertices found in head mesh: {mesh_path}")
 
     verts = np.asarray(vertices, dtype=float)
     x_coords = verts[:, 0]
@@ -87,6 +88,7 @@ def extract_1guilla_head_tip_trajectory(
     link_array: np.ndarray,
     link_names: list[str],
     head_link_name: str = "link0",
+    head_mesh_path: str | None = None,
 ) -> tuple[np.ndarray, str]:
     if not link_names:
         raise ValueError("No link names found in simulation.hdf5")
@@ -101,7 +103,7 @@ def extract_1guilla_head_tip_trajectory(
         return fallback_tip, f"{link_names[head_idx]} tip proxy"
 
     try:
-        tip_local = load_1guilla_head_tip_local_point()
+        tip_local = load_1guilla_head_tip_local_point(head_mesh_path)
     except (FileNotFoundError, ValueError):
         return fallback_tip, f"{link_names[head_idx]} tip proxy"
 
