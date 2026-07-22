@@ -181,7 +181,8 @@ __global__ void rbgs_2d_tiled_kernel(
         const scalar_t* __restrict__ cm1,
         int Nx, int Ny,
         scalar_t jcap_tol,
-        int nsmoothing)
+        int nsmoothing,
+        int reverse)
 {
     // Interior cell indices (0-based)
     const int gi = blockIdx.y * RBGS_2D_I + threadIdx.y;   // row
@@ -243,13 +244,23 @@ __global__ void rbgs_2d_tiled_kernel(
                           ? ((scalar_t)1 / J) : (scalar_t)0;
     const scalar_t neg_f = -f_s[ti][tj];
 
-    // Color: 0 = red (updates on red half-sweep), 1 = black
-    const int color = (gi + gj) & 1;
+    // Color: 0 = updates on the first half-sweep, 1 = on the second.
+    //
+    // ``reverse`` swaps the two, turning red-then-black into black-then-red.
+    // Gauss-Seidel is not self-adjoint: the error propagator of a red-black
+    // sweep has (I - M⁻¹A) with M the red-black lower triangle, whose
+    // A-adjoint is the black-red one.  A V-cycle that pre-smooths red-black
+    // and post-smooths red-black is therefore NON-SYMMETRIC, which is
+    // invalid for a CG preconditioner (measured ~5e-2 relative asymmetry,
+    // with no degenerate cells involved).  Reversing the post-smooth makes
+    // the pair adjoint and the cycle symmetric.  See
+    // ``lilytorch/tests/check_poisson_symmetry.py``.
+    const int color = ((gi + gj) & 1) ^ (reverse ? 1 : 0);
 
     // ── nsmoothing full RBGS sweeps in shared memory ──────────────────
     for (int s = 0; s < nsmoothing; s++) {
 
-        // --- red half-sweep ---
+        // --- first half-sweep (red, or black when reversed) ---
         if (color == 0) {
             const scalar_t sum =
                   cp0_s[ti][tj] * p_s[ti + 2][tj + 1]   // i+1 neighbor
@@ -260,7 +271,7 @@ __global__ void rbgs_2d_tiled_kernel(
         }
         __syncthreads();
 
-        // --- black half-sweep ---
+        // --- second half-sweep (black, or red when reversed) ---
         if (color == 1) {
             const scalar_t sum =
                   cp0_s[ti][tj] * p_s[ti + 2][tj + 1]
@@ -277,13 +288,17 @@ __global__ void rbgs_2d_tiled_kernel(
 }
 
 // ── C++ wrapper ───────────────────────────────────────────────────────
-void rbgs_sweep_2d_cuda(
+// ``_ex`` carries the extra ``reverse`` flag used by the V-cycle post-smooth.
+// The plain ``rbgs_sweep_2d_cuda`` keeps the registered op's signature, so the
+// TORCH_LIBRARY_IMPL binding still matches the schema in ops.cpp.
+void rbgs_sweep_2d_cuda_ex(
         at::Tensor p,
         at::Tensor f,
         at::Tensor cp0, at::Tensor cm0,
         at::Tensor cp1, at::Tensor cm1,
         double jcap_tol,
-        int64_t nsmoothing)
+        int64_t nsmoothing,
+        bool reverse)
 {
     TORCH_CHECK(p.is_contiguous(), "rbgs_sweep_2d: p must be contiguous");
     TORCH_CHECK(f.is_contiguous(), "rbgs_sweep_2d: f must be contiguous");
@@ -332,12 +347,23 @@ void rbgs_sweep_2d_cuda(
             cm1.data_ptr<scalar_t>(),
             Nx, Ny,
             static_cast<scalar_t>(jcap_tol),
-            (int)nsmoothing
+            (int)nsmoothing,
+            reverse ? 1 : 0
         );
 
         // Neumann BC after sweeps (refresh ghost rows for residual / next call)
         apply_neumann_bc_2d<scalar_t>(pp, Nx, Ny, stream);
     });
+}
+
+void rbgs_sweep_2d_cuda(
+        at::Tensor p, at::Tensor f,
+        at::Tensor cp0, at::Tensor cm0,
+        at::Tensor cp1, at::Tensor cm1,
+        double jcap_tol, int64_t nsmoothing)
+{
+    rbgs_sweep_2d_cuda_ex(p, f, cp0, cm0, cp1, cm1,
+                          jcap_tol, nsmoothing, /*reverse=*/false);
 }
 
 // =====================================================================
@@ -399,14 +425,18 @@ __global__ void rbgs_3d_halfsweep_kernel(
 }
 
 // ── C++ wrapper ───────────────────────────────────────────────────────
-void rbgs_sweep_3d_cuda(
+// ``_ex`` carries the extra ``reverse`` flag used by the V-cycle post-smooth
+// (see the note on ``color`` in rbgs_2d_tiled_kernel).  The plain
+// ``rbgs_sweep_3d_cuda`` keeps the registered op's signature.
+void rbgs_sweep_3d_cuda_ex(
         at::Tensor p,
         at::Tensor f,
         at::Tensor cp0, at::Tensor cm0,
         at::Tensor cp1, at::Tensor cm1,
         at::Tensor cp2, at::Tensor cm2,
         double jcap_tol,
-        int64_t nsmoothing)
+        int64_t nsmoothing,
+        bool reverse)
 {
     TORCH_CHECK(p.is_contiguous(), "rbgs_sweep_3d: p must be contiguous");
     TORCH_CHECK(f.is_contiguous(), "rbgs_sweep_3d: f must be contiguous");
@@ -432,8 +462,12 @@ void rbgs_sweep_3d_cuda(
         // Neumann BC before all sweeps
         apply_neumann_bc_3d<scalar_t>(pp, Nx, Ny, Nz, stream);
 
+        // reverse => black-then-red, the A-adjoint of the red-then-black
+        // sweep.  Required for the post-smooth of a CG-preconditioner V-cycle.
+        const int c_first  = reverse ? 1 : 0;
+        const int c_second = reverse ? 0 : 1;
+
         for (int s = 0; s < (int)nsmoothing; s++) {
-            // Red half-sweep (color=0)
             rbgs_3d_halfsweep_kernel<scalar_t><<<grd, blk, 0, stream>>>(
                 pp,
                 f.data_ptr<scalar_t>(),
@@ -442,11 +476,10 @@ void rbgs_sweep_3d_cuda(
                 cp2.data_ptr<scalar_t>(), cm2.data_ptr<scalar_t>(),
                 Nx, Ny, Nz,
                 static_cast<scalar_t>(jcap_tol),
-                0
+                c_first
             );
             apply_neumann_bc_3d<scalar_t>(pp, Nx, Ny, Nz, stream);
 
-            // Black half-sweep (color=1)
             rbgs_3d_halfsweep_kernel<scalar_t><<<grd, blk, 0, stream>>>(
                 pp,
                 f.data_ptr<scalar_t>(),
@@ -455,11 +488,22 @@ void rbgs_sweep_3d_cuda(
                 cp2.data_ptr<scalar_t>(), cm2.data_ptr<scalar_t>(),
                 Nx, Ny, Nz,
                 static_cast<scalar_t>(jcap_tol),
-                1
+                c_second
             );
             apply_neumann_bc_3d<scalar_t>(pp, Nx, Ny, Nz, stream);
         }
     });
+}
+
+void rbgs_sweep_3d_cuda(
+        at::Tensor p, at::Tensor f,
+        at::Tensor cp0, at::Tensor cm0,
+        at::Tensor cp1, at::Tensor cm1,
+        at::Tensor cp2, at::Tensor cm2,
+        double jcap_tol, int64_t nsmoothing)
+{
+    rbgs_sweep_3d_cuda_ex(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
+                          jcap_tol, nsmoothing, /*reverse=*/false);
 }
 
 // =====================================================================

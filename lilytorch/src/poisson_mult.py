@@ -119,6 +119,24 @@ class _MultigridPoissonSolver:
         # non-deflated V-cycle preconditioner (observed to stall in 3-D), so it
         # is OFF by default; flip for experimentation only.
         self._deflate_in_loop = True
+        # ---- Last-solve statistics (for FlowDiagnostics) ---------------
+        # ``_last_resid`` is kept as a 0-dim device tensor: taking the norm is
+        # one kernel, but calling .item() on it would force a host sync every
+        # step.  Consumers store it straight into a device-side record array
+        # and sync only when the run writes diagnostics.h5.
+        self._last_niter = 0
+        self._last_resid = None
+
+    def _record_stats(self, r, niter):
+        """Stash residual/iteration count from the solve that just finished.
+
+        All six native drivers report their own count.  With ``tol < 0`` the
+        early-exit test is skipped so the solve stays host-sync-free and
+        graph-capturable; the loop then always runs its full budget and the
+        count degenerates to ``max_vcycles`` / ``max_cycles``.
+        """
+        self._last_resid = r.abs().max().detach()
+        self._last_niter = int(niter)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -248,6 +266,66 @@ class _MultigridPoissonSolver:
         return s
 
     # ------------------------------------------------------------------
+    # Range / null-space handling for the CG drivers
+    #
+    # ``_apply_op_spd`` zeroes degenerate cells, so B has identically zero
+    # ROWS AND COLUMNS there: the indicator vector of every degenerate cell
+    # lies in null(B), alongside the usual Neumann constant.  A stationary
+    # V-cycle never notices — ``mg_residual_*`` masks the residual, so the
+    # null-space component enters neither an inner product nor the
+    # convergence test.  CG is not so lucky: it forms r·M⁻¹r and d·Bd every
+    # iteration, and a RHS component outside range(B) poisons alpha and beta,
+    # making the residual GROW with iteration count.  b = -h²·div(u*) has
+    # exactly such a component, because div(u*) does not vanish inside a BDIM
+    # solid.  So the RHS must be projected onto range(B) before the CG loop,
+    # and the preconditioner output must be masked to keep M symmetric.
+    # ------------------------------------------------------------------
+    def _active_mask(self, cfaces, dtype):
+        """Interior mask of non-degenerate cells, as ``_apply_op_spd`` sees them."""
+        return (self.compute_J(cfaces).abs() >= self.jcap_tol).to(dtype)
+
+    @staticmethod
+    def _project_rhs(b, mask):
+        """Project ``b`` onto range(B), in place.
+
+        Two steps, both required:
+          1. zero the degenerate cells (the per-cell null directions);
+          2. remove the mean over the LIVE cells (the Neumann constant).
+
+        Step 1 alone is not enough — the surviving constant is then amplified
+        by the CG recurrence instead of being ignored.
+
+        Caveat: if the live region is split into disconnected pools by a
+        solid, null(B) holds one constant PER COMPONENT and removing the
+        global mean only kills the aggregate.  Standalone multigrid has the
+        same limitation; handling it would need a connected-component label.
+        """
+        b.mul_(mask)
+        # sum(dtype=) accumulates in float64 without materialising a float64
+        # copy of the field, and the mean stays a 0-dim device tensor, so this
+        # adds no host sync.
+        nlive = mask.sum(dtype=torch.float64).clamp_(min=1.0)
+        mean = (b.sum(dtype=torch.float64) / nlive).to(b.dtype)
+        b.addcmul_(mask, mean, value=-1.0)
+        return b
+
+    def _precondition(self, r, z, face_arrs, mask, inner):
+        """z ≈ B⁻¹r via V-cycle(s), masked back onto the live subspace.
+
+        The mask is what makes M symmetric: the V-cycle zeroes the residual on
+        degenerate cells on the way down (``mg_residual_*``) but
+        ``prolongate_add`` writes the coarse correction into EVERY fine cell on
+        the way up — a zero column against a non-zero row.  Masking the output
+        restores M = Mᵀ (verified to 4e-16 by
+        ``lilytorch/tests/check_poisson_symmetry.py``).
+        """
+        z.zero_()
+        for _ in range(self.precond_vcycles):
+            z, _ = self._dispatch_vcycle(-r, z, face_arrs)
+        z[inner].mul_(mask)
+        return z
+
+    # ------------------------------------------------------------------
     # MGCG  (multigrid-preconditioned conjugate gradient)
     # ------------------------------------------------------------------
     def solve_mgcg(self, f, p0, **kwargs):
@@ -327,8 +405,16 @@ class _MultigridPoissonSolver:
         Returns ``(x, r, niter, r_norm_final)``.  With ``recycle is None`` and
         ``harvest is None`` this reproduces the previous ``solve_mgcg`` loop
         exactly — that is the single source of truth both methods share.
+
+        ``b`` is consumed (projected onto range(B) in place); every call site
+        builds it fresh immediately beforehand.
         """
         inner = _inner(b.ndim)
+
+        # Project the RHS onto range(B) and keep the mask for the
+        # preconditioner — see the _project_rhs / _precondition notes above.
+        mask = self._active_mask(cfaces, b.dtype)
+        b = self._project_rhs(b, mask)
 
         # Initial residual: r = b - B(x)
         r = b - self._apply_op_spd(x, cfaces)
@@ -342,14 +428,14 @@ class _MultigridPoissonSolver:
         if r_norm < self.tol:
             _gauge_fix(x)
             self._last_niter = 0
+            self._last_resid = r_norm
             return x, r, 0, r_norm
 
         # Preconditioner: approximately solve B(z) = r via V-cycle(s).
         # The V-cycle solves (S - Jp) = f_arg, i.e. -B(p) = f_arg, so we pass
         # f_arg = -r  →  -B(z) ≈ -r  →  B(z) ≈ r.
         z = torch.zeros_like(x)
-        for _ in range(self.precond_vcycles):
-            z, _ = self._dispatch_vcycle(-r, z, face_arrs)
+        z = self._precondition(r, z, face_arrs, mask, inner)
 
         d = z.clone()                              # search direction
         if recycle is not None and self._deflate_in_loop:
@@ -376,9 +462,7 @@ class _MultigridPoissonSolver:
                 break
 
             # --- preconditioner (reuse buffer) ---
-            z.zero_()
-            for _ in range(self.precond_vcycles):
-                z, _ = self._dispatch_vcycle(-r, z, face_arrs)
+            z = self._precondition(r, z, face_arrs, mask, inner)
 
             rz_new = (r * z[inner]).to(torch.float64).sum().to(r.dtype)
             beta = rz_new / rz
@@ -391,6 +475,7 @@ class _MultigridPoissonSolver:
         _gauge_fix(x)
         niter = min(k + 1, self.max_cycles)
         self._last_niter = niter          # exposed for benchmarking/diagnostics
+        self._last_resid = r_norm_final
         return x, r, niter, r_norm_final
 
     # ------------------------------------------------------------------
@@ -445,9 +530,15 @@ class _MultigridPoissonSolver:
         droptol = 1e-4
         Q, W = [], []
         rq_max = 0.0
+        mask = self._active_mask(cfaces, raw[0].dtype)
         for u0 in raw:
             u = u0.clone()
-            u[inner] -= u[inner].to(torch.float64).mean().to(u.dtype)  # kill constant
+            # Same projection the RHS gets: drop the degenerate cells and the
+            # Neumann constant, so the deflation space lives entirely in
+            # range(B).  Subtracting a plain global mean would put a non-zero
+            # value back onto the degenerate cells, where B is identically
+            # zero, and corrupt the Rayleigh quotient below.
+            self._project_rhs(u[inner], mask)
             unorm2 = (u[inner] * u[inner]).to(torch.float64).sum()
             if unorm2 <= 0:
                 continue
@@ -637,7 +728,7 @@ class PoissonSolver(_MultigridPoissonSolver):
             p0 = buf
         if ndim == 2:
             ch, cv = (a.contiguous() for a in face_arrs)
-            r = _nat.poisson_solve_multigrid_2d(
+            r, niter = _nat.poisson_solve_multigrid_2d(
                 p0, f, ch, cv,
                 float(self.h2), float(self.jcap_tol), float(self.w),
                 int(self.nsmoothing), int(self.max_vcycles),
@@ -645,12 +736,13 @@ class PoissonSolver(_MultigridPoissonSolver):
             )
         else:
             ch, cv, cw = (a.contiguous() for a in face_arrs)
-            r = _nat.poisson_solve_multigrid_3d(
+            r, niter = _nat.poisson_solve_multigrid_3d(
                 p0, f, ch, cv, cw,
                 float(self.h2), float(self.jcap_tol), float(self.w),
                 int(self.nsmoothing), int(self.max_vcycles),
                 float(self._tol_float), self.smoother,
             )
+        self._record_stats(r, niter)
         return p0, r
 
     def _native_mgcg(self, f, p0, face_arrs):
@@ -663,7 +755,7 @@ class PoissonSolver(_MultigridPoissonSolver):
         ndim = f.ndim
         if ndim == 2:
             ch, cv = (a.contiguous() for a in face_arrs)
-            r = _nat.poisson_solve_mgcg_2d(
+            r, niter = _nat.poisson_solve_mgcg_2d(
                 p0, f, ch, cv,
                 float(self.h2), float(self.jcap_tol), float(self.w),
                 int(self.nsmoothing), int(self.max_cycles),
@@ -672,13 +764,14 @@ class PoissonSolver(_MultigridPoissonSolver):
             )
         else:
             ch, cv, cw = (a.contiguous() for a in face_arrs)
-            r = _nat.poisson_solve_mgcg_3d(
+            r, niter = _nat.poisson_solve_mgcg_3d(
                 p0, f, ch, cv, cw,
                 float(self.h2), float(self.jcap_tol), float(self.w),
                 int(self.nsmoothing), int(self.max_cycles),
                 int(self.precond_vcycles),
                 float(self._tol_float), self.smoother,
             )
+        self._record_stats(r, niter)
         return p0, r
 
     def _native_rmgcg(self, f, p0, face_arrs, cfaces, inner):
@@ -749,6 +842,7 @@ class PoissonSolver(_MultigridPoissonSolver):
                 harvest.append(D[k].clone())
 
         self._finalize_recycle(niter, recycle is not None, harvest, inner)
+        self._record_stats(r, niter)
 
         if self.verbose:
             n_def = 0 if recycle is None else kdef
@@ -920,16 +1014,18 @@ class PoissonSolver(_MultigridPoissonSolver):
                                     recycle=recycle, harvest=harvest)
 
         inner = _inner(b.ndim)
+        mask = self._active_mask(cfaces, b.dtype)
+        b = self._project_rhs(b, mask)
         r = b - self._apply_op_spd(x, cfaces)
         r_norm = self._convergence_norm(r)
         if r_norm < self.tol:
             _gauge_fix(x)
             self._last_niter = 0
+            self._last_resid = r_norm
             return x, r, 0, r_norm
 
         z = torch.zeros_like(x)
-        for _ in range(self.precond_vcycles):
-            z, _ = self._dispatch_vcycle(-r, z, face_arrs)
+        z = self._precondition(r, z, face_arrs, mask, inner)
         d = z.clone()
         self.BC(d)
         rz = (r * z[inner]).to(torch.float64).sum().to(r.dtype)
@@ -950,9 +1046,7 @@ class PoissonSolver(_MultigridPoissonSolver):
                 if r_norm_final < self.tol:
                     break
 
-            z.zero_()
-            for _ in range(self.precond_vcycles):
-                z, _ = self._dispatch_vcycle(-r, z, face_arrs)
+            z = self._precondition(r, z, face_arrs, mask, inner)
             rz_new = (r * z[inner]).to(torch.float64).sum().to(r.dtype)
             beta = rz_new / rz
             d[inner] = z[inner] + beta * d[inner]
@@ -962,6 +1056,7 @@ class PoissonSolver(_MultigridPoissonSolver):
         _gauge_fix(x)
         niter = min(k + 1, self.max_cycles)
         self._last_niter = niter
+        self._last_resid = r_norm_final
         return x, r, niter, r_norm_final
 
 if __name__ == "__main__":

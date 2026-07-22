@@ -9,7 +9,7 @@
 //
 //  ``p`` is ghost-padded (Nx+2, Ny+2[, Nz+2]); written in place.
 //  ``f`` is interior-shape (no h² applied yet — driver multiplies).
-//  Returns the final residual r (interior shape).
+//  Returns (final residual r (interior shape), iterations performed).
 //
 //  Smoother id: 0 = RBGS, 1 = weighted Jacobi.
 //
@@ -49,6 +49,19 @@ void rbgs_sweep_3d_cuda(
         at::Tensor cp1, at::Tensor cm1,
         at::Tensor cp2, at::Tensor cm2,
         double jcap_tol, int64_t nsmoothing);
+// ``_ex`` variants take the half-sweep-order flag used by the symmetric
+// V-cycle's post-smooth (see smooth_2d / smooth_3d below).
+void rbgs_sweep_2d_cuda_ex(
+        at::Tensor p, at::Tensor f,
+        at::Tensor cp0, at::Tensor cm0,
+        at::Tensor cp1, at::Tensor cm1,
+        double jcap_tol, int64_t nsmoothing, bool reverse);
+void rbgs_sweep_3d_cuda_ex(
+        at::Tensor p, at::Tensor f,
+        at::Tensor cp0, at::Tensor cm0,
+        at::Tensor cp1, at::Tensor cm1,
+        at::Tensor cp2, at::Tensor cm2,
+        double jcap_tol, int64_t nsmoothing, bool reverse);
 void jacobi_sweep_2d_cuda(
         at::Tensor p, at::Tensor f,
         at::Tensor cp0, at::Tensor cm0,
@@ -92,15 +105,20 @@ void prolongate_add_3d_cuda(at::Tensor ec, at::Tensor p);
 // which they are in our driver — we materialise them once per level).
 // ---------------------------------------------------------------------
 
+// ``reverse`` flips the RBGS half-sweep order (red-black -> black-red).  It is
+// set on the POST-smooth of a symmetric (CG-preconditioner) V-cycle so the two
+// smoothers are A-adjoint; weighted Jacobi is already self-adjoint and ignores
+// it.  See the ``color`` note in multigrid_smoothers.cu.
 static inline void smooth_2d(
         at::Tensor p, at::Tensor f,
         at::Tensor cp0, at::Tensor cm0,
         at::Tensor cp1, at::Tensor cm1,
         double jcap_tol, double w, int64_t nsmoothing,
-        int64_t smoother_id)
+        int64_t smoother_id, bool reverse = false)
 {
     if (smoother_id == 0)
-        rbgs_sweep_2d_cuda(p, f, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing);
+        rbgs_sweep_2d_cuda_ex(p, f, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing,
+                              reverse);
     else
         jacobi_sweep_2d_cuda(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing);
 }
@@ -111,11 +129,11 @@ static inline void smooth_3d(
         at::Tensor cp1, at::Tensor cm1,
         at::Tensor cp2, at::Tensor cm2,
         double jcap_tol, double w, int64_t nsmoothing,
-        int64_t smoother_id)
+        int64_t smoother_id, bool reverse = false)
 {
     if (smoother_id == 0)
-        rbgs_sweep_3d_cuda(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
-                           jcap_tol, nsmoothing);
+        rbgs_sweep_3d_cuda_ex(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
+                              jcap_tol, nsmoothing, reverse);
     else
         jacobi_sweep_3d_cuda(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
                              jcap_tol, w, nsmoothing);
@@ -187,8 +205,22 @@ static void vcycle_2d(
         // Prolongate + add into fine p (in place).
         prolongate_add_2d_cuda(p_c, p);
 
-        // Post-smooth + residual.
-        smooth_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing, smoother_id);
+        // Post-smooth + residual.  ``variational`` also reverses the RBGS
+        // half-sweep order here, making the post-smooth the A-adjoint of the
+        // pre-smooth — without it the cycle is non-symmetric under RBGS even
+        // with R = P^T, and invalid as a CG preconditioner.
+        smooth_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing,
+                  smoother_id, /*reverse=*/variational);
+        mg_residual_2d_cuda(p, f, cp0, cm0, cp1, cm1, jcap_tol, r_out);
+    } else if (variational && smoother_id == 0) {
+        // COARSEST LEVEL.  Every other level is symmetric because its
+        // post-smooth is the reversed twin of its pre-smooth, but the bottom
+        // of the V has no post-smooth at all — its "solve" is a bare
+        // red-black sweep, which is NOT self-adjoint, and that alone keeps the
+        // whole cycle asymmetric (measured ~5e-2).  Weighted Jacobi needs
+        // nothing here: a bare Jacobi solve already is self-adjoint.
+        smooth_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing,
+                  smoother_id, /*reverse=*/true);
         mg_residual_2d_cuda(p, f, cp0, cm0, cp1, cm1, jcap_tol, r_out);
     }
 }
@@ -249,8 +281,16 @@ static void vcycle_3d(
 
         prolongate_add_3d_cuda(p_c, p);
 
+        // Post-smooth: ``variational`` reverses the RBGS half-sweep order so
+        // it is the A-adjoint of the pre-smooth (see vcycle_2d).
         smooth_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
-                  jcap_tol, w, nsmoothing, smoother_id);
+                  jcap_tol, w, nsmoothing, smoother_id, /*reverse=*/variational);
+        mg_residual_3d_cuda(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
+                            jcap_tol, r_out);
+    } else if (variational && smoother_id == 0) {
+        // Coarsest level — see the matching note in vcycle_2d.
+        smooth_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
+                  jcap_tol, w, nsmoothing, smoother_id, /*reverse=*/true);
         mg_residual_3d_cuda(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
                             jcap_tol, r_out);
     }
@@ -269,10 +309,58 @@ using lilytorch_kernels::poisson::gauge_fix;
 static inline void apply_neumann_bc(at::Tensor p) { apply_neumann_bc_full(p); }
 
 // =====================================================================
+// Range / null-space handling for the CG drivers (mgcg, rmgcg)
+//
+// ``mg_residual_*`` zeroes degenerate cells (|J| < jcap_tol), so the operator
+// B has identically zero ROWS AND COLUMNS there: the indicator vector of every
+// degenerate cell lies in null(B), alongside the usual Neumann constant.  The
+// stationary multigrid driver never notices — it masks the residual too, so
+// the null-space component enters neither an inner product nor the convergence
+// test.  CG is not so lucky: it forms r·M⁻¹r and d·Bd every iteration, and a
+// RHS component outside range(B) poisons alpha and beta, making the residual
+// GROW with iteration count.  b = −h²·div(u*) has exactly such a component,
+// because div(u*) does not vanish inside a BDIM solid.
+//
+// ``build_active_mask`` fills ``mask`` with 1 on live cells and 0 on
+// degenerate ones (same |J| >= jcap_tol test the smoother and residual use).
+// ``project_range`` applies it to b and then removes the mean over the LIVE
+// cells.  Both steps are needed: masking alone leaves the constant, which the
+// CG recurrence amplifies instead of ignoring.
+//
+// All device-side — the reductions accumulate in float64 via ``sum(kDouble)``
+// without materialising a float64 copy, and the mean stays a 0-dim device
+// tensor, so the drivers remain host-sync-free and CUDA-graph capturable.
+//
+// Caveat: if the live region is split into disconnected pools by a solid,
+// null(B) holds one constant PER COMPONENT and removing the global mean only
+// kills the aggregate.  The stationary driver has the same limitation.
+// =====================================================================
+static inline void build_active_mask(std::vector<at::Tensor> const& cf,
+                                     at::Tensor mask, double jcap_tol)
+{
+    mask.copy_(cf[0]);
+    for (size_t i = 1; i < cf.size(); ++i) mask.add_(cf[i]);
+    mask.abs_().ge_(jcap_tol);          // -> 1.0 on live cells, 0.0 elsewhere
+}
+
+static inline void project_range(at::Tensor b, at::Tensor const& mask)
+{
+    b.mul_(mask);
+    auto mean = (b.sum(at::kDouble)
+                 / mask.sum(at::kDouble).clamp_min(1.0)).to(b.scalar_type());
+    b.addcmul_(mask, mean, -1.0);
+}
+
+// =====================================================================
 // Top-level entry points
 // =====================================================================
 
-static at::Tensor poisson_solve_multigrid_2d_cuda(
+// The drivers below return (residual, iterations performed).  NOTE: with
+// ``tol < 0`` the early-exit test is skipped entirely (that is what keeps the
+// solve host-sync-free and CUDA-graph capturable), so the loop always runs its
+// full budget and the returned count is just ``max_vcycles`` / ``max_cycles``.
+// It is informative only when ``tol >= 0``.
+static std::tuple<at::Tensor, int64_t> poisson_solve_multigrid_2d_cuda(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv,
         double h2, double jcap_tol, double w,
@@ -300,9 +388,11 @@ static at::Tensor poisson_solve_multigrid_2d_cuda(
     f_scaled.copy_(f).mul_(h2);
     auto& r = scratch("mg2d_r", f.sizes(), opts);
 
+    int64_t niter = 0;
     for (int64_t i = 0; i < max_vcycles; ++i) {
         vcycle_2d(p, f_scaled, ch, cv, r,
                   jcap_tol, w, nsmoothing, smoother_id);
+        niter = i + 1;
         // L∞ early-exit (one D→H sync per cycle — matches Python).
         const double rnorm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
         if (tol >= 0.0 && rnorm < tol) break;
@@ -311,10 +401,10 @@ static at::Tensor poisson_solve_multigrid_2d_cuda(
     // Ghost-ring gauge fix
     apply_neumann_bc(p);
     gauge_fix(p);
-    return r;
+    return std::make_tuple(r, niter);
 }
 
-static at::Tensor poisson_solve_multigrid_3d_cuda(
+static std::tuple<at::Tensor, int64_t> poisson_solve_multigrid_3d_cuda(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv, at::Tensor cw,
         double h2, double jcap_tol, double w,
@@ -343,9 +433,11 @@ static at::Tensor poisson_solve_multigrid_3d_cuda(
     f_scaled.copy_(f).mul_(h2);
     auto& r = scratch("mg3d_r", f.sizes(), opts);
 
+    int64_t niter = 0;
     for (int64_t i = 0; i < max_vcycles; ++i) {
         vcycle_3d(p, f_scaled, ch, cv, cw, r,
                   jcap_tol, w, nsmoothing, smoother_id);
+        niter = i + 1;
         const double rnorm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
         if (tol >= 0.0 && rnorm < tol) break;
     }
@@ -354,7 +446,7 @@ static at::Tensor poisson_solve_multigrid_3d_cuda(
     // corners before the gauge mean, which the per-sweep face-only BC leaves stale.
     apply_neumann_bc(p);
     gauge_fix(p);
-    return r;
+    return std::make_tuple(r, niter);
 }
 
 // =====================================================================
@@ -367,7 +459,7 @@ static at::Tensor poisson_solve_multigrid_3d_cuda(
 //  so we don't need to apply BC before calling it.)
 // =====================================================================
 
-static at::Tensor poisson_solve_mgcg_2d_cuda(
+static std::tuple<at::Tensor, int64_t> poisson_solve_mgcg_2d_cuda(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv,
         double h2, double jcap_tol, double w,
@@ -397,6 +489,11 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
     auto& b = scratch("mgcg2d_b", {Nx, Ny}, opts);
     b.copy_(f).mul_(-h2);
 
+    // Project b onto range(B) and keep the mask for the preconditioner.
+    auto& mask = scratch("mgcg2d_mask", {Nx, Ny}, opts);
+    build_active_mask({cp0, cm0, cp1, cm1}, mask, jcap_tol);
+    project_range(b, mask);
+
     // x = p (already passed in), apply BC
     apply_neumann_bc(p);
 
@@ -412,7 +509,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
         gauge_fix(p);
-        return r;
+        return std::make_tuple(r, (int64_t)0);
     }
 
     // Preconditioner buffers (persistent).
@@ -420,25 +517,32 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
     z.zero_();
     auto& r_buf = scratch("mgcg2d_r_buf", {Nx, Ny}, opts);   // V-cycle residual scratch
 
+    using namespace torch::indexing;
+    auto z_in = z.index({Slice(1, -1), Slice(1, -1)});
+
     // V-cycle solves (S − Jp) p = f_arg, i.e. −B(p) = f_arg, so pass −r
     // to get B(z) ≈ r.  Use in-place neg to avoid a temporary allocation.
+    // Masking z afterwards is what makes M symmetric: the V-cycle zeroes the
+    // residual on degenerate cells on the way down (mg_residual_*) but
+    // prolongate_add writes the coarse correction into EVERY fine cell on the
+    // way up — a zero column against a non-zero row.
     r.neg_();
     for (int64_t i = 0; i < precond_vcycles; ++i)
         vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
     r.neg_();  // restore
+    z_in.mul_(mask);
 
     auto& d = scratch("mgcg2d_d", {Nx + 2, Ny + 2}, opts);
     d.copy_(z);
     apply_neumann_bc(d);
 
-    using namespace torch::indexing;
     auto d_in = d.index({Slice(1, -1), Slice(1, -1)});
     auto x_in = p.index({Slice(1, -1), Slice(1, -1)});
-    auto z_in = z.index({Slice(1, -1), Slice(1, -1)});
 
     auto rz = (r * z_in).to(at::kDouble).sum();   // scalar tensor (f64)
     auto& q  = scratch("mgcg2d_q", {Nx, Ny}, opts);
 
+    int64_t niter = 0;
     for (int64_t k = 0; k < max_cycles; ++k) {
         // q = B(d).  mg_residual applies its own BC to d (read-only inside).
         // d has BC applied above / at end of previous iter.
@@ -454,6 +558,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
         x_in.addcmul_(d_in, alpha);            // x += alpha·d   (no D→H copy)
         apply_neumann_bc(p);
         r.addcmul_(q, alpha, -1.0);            // r -= alpha·q   (no D→H copy)
+        niter = k + 1;
 
         // tol < 0  ⇒  no early-exit: skip the residual-norm D→H sync entirely
         // (short-circuit avoids .item()) so the whole solve is host-sync-free
@@ -466,6 +571,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
         for (int64_t i = 0; i < precond_vcycles; ++i)
             vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
         r.neg_(); // restore
+        z_in.mul_(mask);
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
         auto beta = (rz_new / rz).to(p.scalar_type());
@@ -476,10 +582,10 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
     }
 
     gauge_fix(p);
-    return r;
+    return std::make_tuple(r, niter);
 }
 
-static at::Tensor poisson_solve_mgcg_3d_cuda(
+static std::tuple<at::Tensor, int64_t> poisson_solve_mgcg_3d_cuda(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv, at::Tensor cw,
         double h2, double jcap_tol, double w,
@@ -511,6 +617,11 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
     auto& b = scratch("mgcg3d_b", {Nx, Ny, Nz}, opts);
     b.copy_(f).mul_(-h2);
 
+    // Project b onto range(B) and keep the mask for the preconditioner.
+    auto& mask = scratch("mgcg3d_mask", {Nx, Ny, Nz}, opts);
+    build_active_mask({cp0, cm0, cp1, cm1, cp2, cm2}, mask, jcap_tol);
+    project_range(b, mask);
+
     apply_neumann_bc(p);
 
     // Persistent zero-f buffer — allocated once, never written (read-only).
@@ -523,31 +634,35 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
         gauge_fix(p);
-        return r;
+        return std::make_tuple(r, (int64_t)0);
     }
 
     auto& z     = scratch("mgcg3d_z", {Nx + 2, Ny + 2, Nz + 2}, opts);
     z.zero_();
     auto& r_buf = scratch("mgcg3d_r_buf", {Nx, Ny, Nz}, opts);
 
+    using namespace torch::indexing;
+    auto z_in = z.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
+
     // In-place neg to avoid temporary allocation (same pattern as inner loop).
+    // z is masked afterwards to keep M symmetric — see build_active_mask.
     r.neg_();
     for (int64_t i = 0; i < precond_vcycles; ++i)
         vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
     r.neg_();  // restore
+    z_in.mul_(mask);
 
     auto& d = scratch("mgcg3d_d", {Nx + 2, Ny + 2, Nz + 2}, opts);
     d.copy_(z);
     apply_neumann_bc(d);
 
-    using namespace torch::indexing;
     auto d_in = d.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
     auto x_in = p.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
-    auto z_in = z.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
 
     auto rz = (r * z_in).to(at::kDouble).sum();
     auto& q  = scratch("mgcg3d_q", {Nx, Ny, Nz}, opts);
 
+    int64_t niter = 0;
     for (int64_t k = 0; k < max_cycles; ++k) {
         mg_residual_3d_cuda(d, f_zero, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, q);
 
@@ -557,6 +672,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
         x_in.addcmul_(d_in, alpha);
         apply_neumann_bc(p);
         r.addcmul_(q, alpha, -1.0);
+        niter = k + 1;
 
         // tol < 0  ⇒  no early-exit: skip the residual-norm D→H sync entirely
         // (short-circuit avoids .item()) so the whole solve is host-sync-free
@@ -569,6 +685,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
         for (int64_t i = 0; i < precond_vcycles; ++i)
             vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
         r.neg_();
+        z_in.mul_(mask);
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
         auto beta = (rz_new / rz).to(p.scalar_type());
@@ -578,7 +695,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
     }
 
     gauge_fix(p);
-    return r;
+    return std::make_tuple(r, niter);
 }
 
 // =====================================================================
@@ -626,6 +743,11 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
     auto& b = scratch("rmgcg2d_b", {Nx, Ny}, opts);
     b.copy_(f).mul_(-h2);
 
+    // Project b onto range(B) and keep the mask for the preconditioner.
+    auto& mask = scratch("rmgcg2d_mask", {Nx, Ny}, opts);
+    build_active_mask({cp0, cm0, cp1, cm1}, mask, jcap_tol);
+    project_range(b, mask);
+
     apply_neumann_bc(p);
 
     // Persistent zero-f buffer — allocated once, never written (read-only).
@@ -664,16 +786,19 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
     z.zero_();
     auto& r_buf = scratch("rmgcg2d_r_buf", {Nx, Ny}, opts);
 
-    // In-place neg to avoid temporary allocation.
+    auto z_in = z.index({Slice(1, -1), Slice(1, -1)});
+
+    // In-place neg to avoid temporary allocation.  z is masked afterwards to
+    // keep M symmetric — see build_active_mask.
     r.neg_();
     for (int64_t i = 0; i < precond_vcycles; ++i)
         vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
     r.neg_();  // restore
+    z_in.mul_(mask);
 
     auto& d    = scratch("rmgcg2d_d", {Nx + 2, Ny + 2}, opts);
     d.copy_(z);
     auto d_in = d.index({Slice(1, -1), Slice(1, -1)});
-    auto z_in = z.index({Slice(1, -1), Slice(1, -1)});
 
     // proj d B-orthogonal to U:  d -= U (Wᵀz)
     if (kdef > 0) {
@@ -709,6 +834,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
         for (int64_t i = 0; i < precond_vcycles; ++i)
             vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
         r.neg_();
+        z_in.mul_(mask);
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
         auto beta = (rz_new / rz).to(p.scalar_type());
@@ -760,6 +886,11 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
     auto& b = scratch("rmgcg3d_b", {Nx, Ny, Nz}, opts);
     b.copy_(f).mul_(-h2);
 
+    // Project b onto range(B) and keep the mask for the preconditioner.
+    auto& mask = scratch("rmgcg3d_mask", {Nx, Ny, Nz}, opts);
+    build_active_mask({cp0, cm0, cp1, cm1, cp2, cm2}, mask, jcap_tol);
+    project_range(b, mask);
+
     apply_neumann_bc(p);
 
     // Persistent zero-f buffer — allocated once, never written (read-only).
@@ -798,16 +929,19 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
     z.zero_();
     auto& r_buf = scratch("rmgcg3d_r_buf", {Nx, Ny, Nz}, opts);
 
-    // In-place neg to avoid temporary allocation.
+    auto z_in = z.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
+
+    // In-place neg to avoid temporary allocation.  z is masked afterwards to
+    // keep M symmetric — see build_active_mask.
     r.neg_();
     for (int64_t i = 0; i < precond_vcycles; ++i)
         vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
     r.neg_();  // restore
+    z_in.mul_(mask);
 
     auto& d    = scratch("rmgcg3d_d", {Nx + 2, Ny + 2, Nz + 2}, opts);
     d.copy_(z);
     auto d_in = d.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
-    auto z_in = z.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
 
     if (kdef > 0) {
         auto nu = (W * z_in.unsqueeze(0)).to(at::kDouble).sum({1, 2, 3})
@@ -842,6 +976,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
         for (int64_t i = 0; i < precond_vcycles; ++i)
             vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
         r.neg_();
+        z_in.mul_(mask);
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
         auto beta = (rz_new / rz).to(p.scalar_type());

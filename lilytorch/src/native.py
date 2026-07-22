@@ -799,14 +799,18 @@ def poisson_solve_multigrid_2d(
         p: Tensor, f: Tensor, ch: Tensor, cv: Tensor,
         h2: float, jcap_tol: float, w: float,
         nsmoothing: int, max_vcycles: int,
-        tol: float, smoother: str = "rbgs") -> Tensor:
+        tol: float, smoother: str = "rbgs"):
     """Native multigrid Poisson driver (2-D).
 
     Replaces the Python multi-V-cycle loop in PoissonSolver.solve_multigrid:
     scales ``f`` by ``h2``, runs up to ``max_vcycles`` V-cycles with L∞
     early-exit at ``tol``, then subtracts the float64-computed mean from
-    ``p``.  ``p`` (ghost-padded) is mutated in place; the returned tensor
-    is the final residual on the interior grid.
+    ``p``.  ``p`` (ghost-padded) is mutated in place.
+
+    Returns ``(r, niter)``: the final residual on the interior grid and the
+    number of V-cycles performed.  ``tol < 0`` disables the early exit (that
+    is what keeps the solve host-sync-free and graph-capturable), so ``niter``
+    is then always ``max_vcycles`` and carries no information.
     """
     sid = _SMOOTHER_MAP[smoother]
     return torch.ops.lilytorch_kernels.poisson_solve_multigrid_2d.default(
@@ -820,7 +824,7 @@ def poisson_solve_multigrid_3d(
         p: Tensor, f: Tensor, ch: Tensor, cv: Tensor, cw: Tensor,
         h2: float, jcap_tol: float, w: float,
         nsmoothing: int, max_vcycles: int,
-        tol: float, smoother: str = "rbgs") -> Tensor:
+        tol: float, smoother: str = "rbgs"):
     """Native multigrid Poisson driver (3-D).  See 2-D for semantics."""
     sid = _SMOOTHER_MAP[smoother]
     return torch.ops.lilytorch_kernels.poisson_solve_multigrid_3d.default(
@@ -834,21 +838,24 @@ def poisson_solve_multigrid_3d(
 def _poisson_solve_multigrid_2d_abstract(
         p, f, ch, cv, h2, jcap_tol, w,
         nsmoothing, max_vcycles, tol, smoother_id):
-    return torch.empty_like(f)
+    return torch.empty_like(f), 0
 
 @torch.library.register_fake("lilytorch_kernels::poisson_solve_multigrid_3d")
 def _poisson_solve_multigrid_3d_abstract(
         p, f, ch, cv, cw, h2, jcap_tol, w,
         nsmoothing, max_vcycles, tol, smoother_id):
-    return torch.empty_like(f)
+    return torch.empty_like(f), 0
 
 
 def poisson_solve_mgcg_2d(
         p: Tensor, f: Tensor, ch: Tensor, cv: Tensor,
         h2: float, jcap_tol: float, w: float,
         nsmoothing: int, max_cycles: int, precond_vcycles: int,
-        tol: float, smoother: str = "rbgs") -> Tensor:
-    """Native MGCG Poisson driver (2-D).  ``p`` is mutated in place; returns final residual."""
+        tol: float, smoother: str = "rbgs"):
+    """Native MGCG Poisson driver (2-D).  ``p`` is mutated in place.
+
+    Returns ``(r, niter)`` — final residual and CG iterations performed; same
+    ``tol < 0`` caveat as the multigrid driver."""
     sid = _SMOOTHER_MAP[smoother]
     return torch.ops.lilytorch_kernels.poisson_solve_mgcg_2d.default(
         p, f, ch, cv,
@@ -862,8 +869,8 @@ def poisson_solve_mgcg_3d(
         p: Tensor, f: Tensor, ch: Tensor, cv: Tensor, cw: Tensor,
         h2: float, jcap_tol: float, w: float,
         nsmoothing: int, max_cycles: int, precond_vcycles: int,
-        tol: float, smoother: str = "rbgs") -> Tensor:
-    """Native MGCG Poisson driver (3-D)."""
+        tol: float, smoother: str = "rbgs"):
+    """Native MGCG Poisson driver (3-D).  See 2-D for semantics."""
     sid = _SMOOTHER_MAP[smoother]
     return torch.ops.lilytorch_kernels.poisson_solve_mgcg_3d.default(
         p, f, ch, cv, cw,
@@ -877,14 +884,14 @@ def poisson_solve_mgcg_3d(
 def _poisson_solve_mgcg_2d_abstract(
         p, f, ch, cv, h2, jcap_tol, w,
         nsmoothing, max_cycles, precond_vcycles, tol, smoother_id):
-    return torch.empty_like(f)
+    return torch.empty_like(f), 0
 
 
 @torch.library.register_fake("lilytorch_kernels::poisson_solve_mgcg_3d")
 def _poisson_solve_mgcg_3d_abstract(
         p, f, ch, cv, cw, h2, jcap_tol, w,
         nsmoothing, max_cycles, precond_vcycles, tol, smoother_id):
-    return torch.empty_like(f)
+    return torch.empty_like(f), 0
 
 
 def poisson_solve_rmgcg_2d(
