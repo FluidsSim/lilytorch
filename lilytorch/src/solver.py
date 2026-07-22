@@ -706,6 +706,14 @@ class FluidSolver(PlottingMixin):
                 pyobject = pars,
             )
 
+        elif "existing_folder" in output:
+            # Frame saving is off, but the run still has a folder.  Point
+            # save_path at it so diagnostics.h5 is written: the diagnostics
+            # time-series is the cheapest way to see whether a run is healthy,
+            # and it used to be silently dropped by any config that turned
+            # frames off.
+            self.save_path = output["existing_folder"] + "/"
+
         # ---- flow diagnostics monitor (opt-in via diagnostics_every>0) ----
         if self.diagnostics_every > 0:
             self.diagnostics = FlowDiagnostics(
@@ -2298,6 +2306,7 @@ class FluidSolver(PlottingMixin):
                 self.divergence, self.vorticity, w=w_vel,
                 sdf_cc=getattr(cb, "sdf_val", None),
                 mu_fn=getattr(cb, "mu_funcs", None),
+                poisson_solver=getattr(self, "poisson_solver", None),
             )
 
         # ---- free BDIM fields to reclaim GPU memory between steps ----

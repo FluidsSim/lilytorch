@@ -865,6 +865,7 @@ class TwoPhaseSolver(FluidSolver):
                 self.divergence, self.vorticity, w=w_vel,
                 sdf_cc=getattr(cb, "sdf_val", None),
                 mu_fn=getattr(cb, "mu_funcs", None),
+                poisson_solver=getattr(self, "poisson_solver", None),
             )
         self._release_bdim_fields()
         # Flush the CUDA allocator cache only at the base solver's throttled
