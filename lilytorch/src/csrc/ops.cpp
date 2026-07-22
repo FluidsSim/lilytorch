@@ -480,34 +480,38 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // (with L∞ early-exit at ``tol``), final float64 mean subtraction.
     // ``p`` is ghost-padded and mutated in place; returns the final residual.
     // ``smoother_id``: 0 = RBGS, 1 = weighted Jacobi (uses ``w``).
+    // Returns (residual, V-cycles performed).  With ``tol < 0`` there is no
+    // early exit, so the count is always ``max_vcycles`` and carries no
+    // information — see the note on the graph-capture path in poisson_solve.cu.
     m.def(
         "poisson_solve_multigrid_2d("
         "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv,"
         " float h2, float jcap_tol, float w,"
         " int nsmoothing, int max_vcycles, float tol, int smoother_id"
-        ") -> Tensor");
+        ") -> (Tensor, int)");
     m.def(
         "poisson_solve_multigrid_3d("
         "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv, Tensor cw,"
         " float h2, float jcap_tol, float w,"
         " int nsmoothing, int max_vcycles, float tol, int smoother_id"
-        ") -> Tensor");
+        ") -> (Tensor, int)");
 
     // MGCG (multigrid-preconditioned conjugate gradient).
+    // Returns (residual, CG iterations performed); same ``tol < 0`` caveat.
     m.def(
         "poisson_solve_mgcg_2d("
         "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv,"
         " float h2, float jcap_tol, float w,"
         " int nsmoothing, int max_cycles, int precond_vcycles,"
         " float tol, int smoother_id"
-        ") -> Tensor");
+        ") -> (Tensor, int)");
     m.def(
         "poisson_solve_mgcg_3d("
         "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv, Tensor cw,"
         " float h2, float jcap_tol, float w,"
         " int nsmoothing, int max_cycles, int precond_vcycles,"
         " float tol, int smoother_id"
-        ") -> Tensor");
+        ") -> (Tensor, int)");
 
     // RMGCG (recycled / deflated MGCG).  U,W carry the B-orthonormal recycle
     // basis (kdef may be 0 → plain MGCG); returns (residual, harvested last-k

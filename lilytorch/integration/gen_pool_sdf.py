@@ -1,6 +1,5 @@
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
-from lilytorch.util.paths import lilytorch_repo_root
 import os
 
 # ── Material palettes (ambient / diffuse / specular / emissive) ────────
@@ -130,11 +129,10 @@ def _add_visual_only_link(model, name, pose_text, size_text, mat_dict):
     return link
 
 
-def _write_sdf(sdf_elem, rel_path):
-    """Pretty-print an SDF ElementTree and write it under the sdfs folder."""
+def _write_sdf(sdf_elem, output_dir, rel_path):
+    """Pretty-print an SDF ElementTree beneath an explicit output directory."""
     xml_str = minidom.parseString(ET.tostring(sdf_elem)).toprettyxml(indent="  ")
-    output_path = os.path.join(
-        lilytorch_repo_root, 'examples', 'sdfs', *rel_path.split('/'))
+    output_path = os.path.join(output_dir, *rel_path.split('/'))
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
         f.write(xml_str)
@@ -146,7 +144,7 @@ def _write_sdf(sdf_elem, rel_path):
 def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
                     wall_thickness=None, wall_height=0.3, plotting=False,
                     wall_alpha=None, grid_spacing=None, floor_color=None,
-                    lip=None, include_floor=True):
+                    lip=None, include_floor=True, *, output_dir):
     """Generate a rectangular pool SDF with textured walls and floor.
 
     Parameters
@@ -342,11 +340,12 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         plt.show()
 
     # ── write SDF file ────────────────────────────────────────────────
-    return _write_sdf(sdf, 'pool/sdf/pool.sdf')
+    return _write_sdf(sdf, output_dir, 'pool/sdf/pool.sdf')
 
 
 def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
-                     water_height=0.0, wall_height=0.3, water_alpha=None):
+                     water_height=0.0, wall_height=0.3, water_alpha=None, *,
+                     output_dir):
     """Generate a visual-only water-volume SDF sized to the pool interior.
 
     Parameters
@@ -400,4 +399,4 @@ def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
     water_mat = _set_alpha(WATER_MATERIAL, water_alpha) if water_alpha is not None else WATER_MATERIAL
     _add_material(vis, water_mat)
 
-    return _write_sdf(sdf, 'arena_water/sdf/arena_water.sdf')
+    return _write_sdf(sdf, output_dir, 'arena_water/sdf/arena_water.sdf')

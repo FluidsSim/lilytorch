@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <tuple>
 #include <vector>
 
 #include "common/poisson_gauge.h"
@@ -99,20 +100,28 @@ static inline void apply_neumann_bc_3d_cpu(scalar_t* p, int Nx, int Ny, int Nz) 
 // =====================================================================
 
 template <typename scalar_t>
+// ``reverse`` swaps the half-sweep order (red-black -> black-red).  Gauss-
+// Seidel is not self-adjoint, so a V-cycle that pre- and post-smooths in the
+// same colour order is NON-SYMMETRIC and invalid as a CG preconditioner; the
+// post-smooth of a variational V-cycle passes reverse=true to make the pair
+// A-adjoint.  See lilytorch/tests/check_poisson_symmetry.py.
 static void rbgs_sweep_2d_cpu_impl(
         scalar_t* p, const scalar_t* f,
         const scalar_t* cp0, const scalar_t* cm0,
         const scalar_t* cp1, const scalar_t* cm1,
-        int Nx, int Ny, scalar_t jcap_tol, int nsmoothing)
+        int Nx, int Ny, scalar_t jcap_tol, int nsmoothing,
+        bool reverse = false)
 {
     const int stride_p = Ny + 2;
     const int stride_c = Ny;
+    const int c_first  = reverse ? 1 : 0;
+    const int c_second = reverse ? 0 : 1;
 
     // Neumann BC before sweeps
     apply_neumann_bc_2d_cpu(p, Nx, Ny);
 
     for (int s = 0; s < nsmoothing; ++s) {
-        // Red half-sweep: (i+j) even
+        // First half-sweep: red, or black when reversed
         at::parallel_for(0, Nx, 1, [&](int64_t istart, int64_t iend) {
             for (int64_t i = istart; i < iend; ++i) {
                 const int pi = (int)i + 1;
@@ -123,7 +132,7 @@ static void rbgs_sweep_2d_cpu_impl(
                 const scalar_t* f_row   = f   + (int)i * stride_c;
                 scalar_t* p_row = p + pi * stride_p;
                 for (int j = 0; j < Ny; ++j) {
-                    if ((((int)i + j) & 1) != 0) continue;  // red only
+                    if ((((int)i + j) & 1) != c_first) continue;
                     const scalar_t J = cp0_row[j] + cm0_row[j] + cp1_row[j] + cm1_row[j];
                     if (J < jcap_tol && J > -jcap_tol) continue;
                     const int pj = j + 1;
@@ -137,7 +146,7 @@ static void rbgs_sweep_2d_cpu_impl(
             }
         });
 
-        // Black half-sweep: (i+j) odd
+        // Second half-sweep: black, or red when reversed
         at::parallel_for(0, Nx, 1, [&](int64_t istart, int64_t iend) {
             for (int64_t i = istart; i < iend; ++i) {
                 const int pi = (int)i + 1;
@@ -148,7 +157,7 @@ static void rbgs_sweep_2d_cpu_impl(
                 const scalar_t* f_row   = f   + (int)i * stride_c;
                 scalar_t* p_row = p + pi * stride_p;
                 for (int j = 0; j < Ny; ++j) {
-                    if ((((int)i + j) & 1) != 1) continue;  // black only
+                    if ((((int)i + j) & 1) != c_second) continue;
                     const scalar_t J = cp0_row[j] + cm0_row[j] + cp1_row[j] + cm1_row[j];
                     if (J < jcap_tol && J > -jcap_tol) continue;
                     const int pj = j + 1;
@@ -177,15 +186,19 @@ static void rbgs_sweep_3d_cpu_impl(
         const scalar_t* cp0, const scalar_t* cm0,
         const scalar_t* cp1, const scalar_t* cm1,
         const scalar_t* cp2, const scalar_t* cm2,
-        int Nx, int Ny, int Nz, scalar_t jcap_tol, int nsmoothing)
+        int Nx, int Ny, int Nz, scalar_t jcap_tol, int nsmoothing,
+        bool reverse = false)
 {
     const int si = (Ny + 2) * (Nz + 2);
     const int sj = Nz + 2;
+    // See the note on ``reverse`` above rbgs_sweep_2d_cpu_impl.
+    const int c_first  = reverse ? 1 : 0;
+    const int c_second = reverse ? 0 : 1;
 
     apply_neumann_bc_3d_cpu(p, Nx, Ny, Nz);
 
     for (int s = 0; s < nsmoothing; ++s) {
-        // Red half-sweep
+        // First half-sweep: red, or black when reversed
         at::parallel_for(0, Nx, 1, [&](int64_t istart, int64_t iend) {
             for (int64_t i = istart; i < iend; ++i) {
                 const int pi = (int)i + 1;
@@ -194,7 +207,7 @@ static void rbgs_sweep_3d_cpu_impl(
                     const int cbase = (int)i * (Ny * Nz) + j * Nz;
                     const int pbase = pi * si + pj * sj + 1;
                     for (int k = 0; k < Nz; ++k) {
-                        if ((((int)i + j + k) & 1) != 0) continue;   // red = (i+j+k) even
+                        if ((((int)i + j + k) & 1) != c_first) continue;
                         const scalar_t J = cp0[cbase+k] + cm0[cbase+k]
                                          + cp1[cbase+k] + cm1[cbase+k]
                                          + cp2[cbase+k] + cm2[cbase+k];
@@ -216,7 +229,7 @@ static void rbgs_sweep_3d_cpu_impl(
         // between half-sweeps; skipping it desynchronises the two backends).
         apply_neumann_bc_3d_cpu(p, Nx, Ny, Nz);
 
-        // Black half-sweep
+        // Second half-sweep: black, or red when reversed
         at::parallel_for(0, Nx, 1, [&](int64_t istart, int64_t iend) {
             for (int64_t i = istart; i < iend; ++i) {
                 const int pi = (int)i + 1;
@@ -225,7 +238,7 @@ static void rbgs_sweep_3d_cpu_impl(
                     const int cbase = (int)i * (Ny * Nz) + j * Nz;
                     const int pbase = pi * si + pj * sj + 1;
                     for (int k = 0; k < Nz; ++k) {
-                        if ((((int)i + j + k) & 1) != 1) continue;   // black = (i+j+k) odd
+                        if ((((int)i + j + k) & 1) != c_second) continue;
                         const scalar_t J = cp0[cbase+k] + cm0[cbase+k]
                                          + cp1[cbase+k] + cm1[cbase+k]
                                          + cp2[cbase+k] + cm2[cbase+k];
@@ -960,11 +973,15 @@ static void vcycle_2d_cpu(
         // Prolongate + add
         prolongate_add_2d_cpu_impl(p_c.data(), p, Nx_c, Ny_c, Nx, Ny);
 
-        // Post-smooth
+        // Post-smooth.  ``variational`` also reverses the RBGS half-sweep
+        // order, making the post-smooth the A-adjoint of the pre-smooth —
+        // without it the cycle is non-symmetric under RBGS even with R = P^T,
+        // and invalid as a CG preconditioner.
         if (smoother_id == 0) {
             rbgs_sweep_2d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
                                     cp1_buf.data(), cm1_buf.data(),
-                                    Nx, Ny, jcap_tol, nsmoothing);
+                                    Nx, Ny, jcap_tol, nsmoothing,
+                                    /*reverse=*/variational);
         } else {
             jacobi_sweep_2d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
                                       cp1_buf.data(), cm1_buf.data(),
@@ -975,11 +992,24 @@ static void vcycle_2d_cpu(
         mg_residual_2d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
                                  cp1_buf.data(), cm1_buf.data(),
                                  Nx, Ny, jcap_tol, r_out);
+    } else if (variational && smoother_id == 0) {
+        // COARSEST LEVEL.  Every other level is symmetric because its
+        // post-smooth is the reversed twin of its pre-smooth, but the bottom
+        // of the V has no post-smooth at all — its "solve" is a bare red-black
+        // sweep, which is NOT self-adjoint, and that alone keeps the whole
+        // cycle asymmetric.  Weighted Jacobi needs nothing here: a bare Jacobi
+        // solve already is self-adjoint.
+        rbgs_sweep_2d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
+                                cp1_buf.data(), cm1_buf.data(),
+                                Nx, Ny, jcap_tol, nsmoothing, /*reverse=*/true);
+        mg_residual_2d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
+                                 cp1_buf.data(), cm1_buf.data(),
+                                 Nx, Ny, jcap_tol, r_out);
     }
 }
 
 template <typename scalar_t>
-static at::Tensor poisson_solve_multigrid_2d_cpu_impl(
+static std::tuple<at::Tensor, int64_t> poisson_solve_multigrid_2d_cpu_impl(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv,
         double h2, double jcap_tol, double w,
@@ -1004,12 +1034,14 @@ static at::Tensor poisson_solve_multigrid_2d_cpu_impl(
     const scalar_t* ccv = cv.data_ptr<scalar_t>();
     scalar_t* rr = r.data_ptr<scalar_t>();
 
+    int64_t niter = 0;
     for (int64_t i = 0; i < max_vcycles; ++i) {
         vcycle_2d_cpu<scalar_t>(pp, ff, cch, ccv,
                                  Nx, Ny,
                                  static_cast<scalar_t>(jcap_tol),
                                  static_cast<scalar_t>(w),
                                  (int)nsmoothing, (int)smoother_id, rr);
+        niter = i + 1;
         if (tol >= 0.0) {
             double rnorm = r.abs().max().item<double>();
             if (rnorm < tol) break;
@@ -1022,7 +1054,7 @@ static at::Tensor poisson_solve_multigrid_2d_cpu_impl(
     // included — is bit-comparable across backends.
     lilytorch_kernels::poisson::apply_neumann_bc_full(p);
     lilytorch_kernels::poisson::gauge_fix(p);
-    return r;
+    return std::make_tuple(r, niter);
 }
 
 // =====================================================================
@@ -1101,11 +1133,14 @@ static void vcycle_3d_cpu(
 
         prolongate_add_3d_cpu_impl(p_c.data(), p, Nx_c, Ny_c, Nz_c, Nx, Ny, Nz);
 
+        // Post-smooth: ``variational`` reverses the RBGS half-sweep order so
+        // it is the A-adjoint of the pre-smooth (see vcycle_2d_cpu).
         if (smoother_id == 0) {
             rbgs_sweep_3d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
                                     cp1_buf.data(), cm1_buf.data(),
                                     cp2_buf.data(), cm2_buf.data(),
-                                    Nx, Ny, Nz, jcap_tol, nsmoothing);
+                                    Nx, Ny, Nz, jcap_tol, nsmoothing,
+                                    /*reverse=*/variational);
         } else {
             jacobi_sweep_3d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
                                       cp1_buf.data(), cm1_buf.data(),
@@ -1117,11 +1152,22 @@ static void vcycle_3d_cpu(
                                  cp1_buf.data(), cm1_buf.data(),
                                  cp2_buf.data(), cm2_buf.data(),
                                  Nx, Ny, Nz, jcap_tol, r_out);
+    } else if (variational && smoother_id == 0) {
+        // Coarsest level — see the matching note in vcycle_2d_cpu.
+        rbgs_sweep_3d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
+                                cp1_buf.data(), cm1_buf.data(),
+                                cp2_buf.data(), cm2_buf.data(),
+                                Nx, Ny, Nz, jcap_tol, nsmoothing,
+                                /*reverse=*/true);
+        mg_residual_3d_cpu_impl(p, f, cp0_buf.data(), cm0_buf.data(),
+                                 cp1_buf.data(), cm1_buf.data(),
+                                 cp2_buf.data(), cm2_buf.data(),
+                                 Nx, Ny, Nz, jcap_tol, r_out);
     }
 }
 
 template <typename scalar_t>
-static at::Tensor poisson_solve_multigrid_3d_cpu_impl(
+static std::tuple<at::Tensor, int64_t> poisson_solve_multigrid_3d_cpu_impl(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv, at::Tensor cw,
         double h2, double jcap_tol, double w,
@@ -1147,12 +1193,14 @@ static at::Tensor poisson_solve_multigrid_3d_cpu_impl(
     const scalar_t* ccw = cw.data_ptr<scalar_t>();
     scalar_t* rr = r.data_ptr<scalar_t>();
 
+    int64_t niter = 0;
     for (int64_t i = 0; i < max_vcycles; ++i) {
         vcycle_3d_cpu<scalar_t>(pp, ff, cch, ccv, ccw,
                                  Nx, Ny, Nz,
                                  static_cast<scalar_t>(jcap_tol),
                                  static_cast<scalar_t>(w),
                                  (int)nsmoothing, (int)smoother_id, rr);
+        niter = i + 1;
         if (tol >= 0.0) {
             double rnorm = r.abs().max().item<double>();
             if (rnorm < tol) break;
@@ -1162,7 +1210,7 @@ static at::Tensor poisson_solve_multigrid_3d_cpu_impl(
     // Full ghost-ring Neumann BC + interior gauge fix — see the 2-D driver.
     lilytorch_kernels::poisson::apply_neumann_bc_full(p);
     lilytorch_kernels::poisson::gauge_fix(p);
-    return r;
+    return std::make_tuple(r, niter);
 }
 
 // =====================================================================
@@ -1420,7 +1468,7 @@ static void cvof_sweep_cpu_dispatch(
     });
 }
 
-static at::Tensor poisson_solve_multigrid_2d_cpu(
+static std::tuple<at::Tensor, int64_t> poisson_solve_multigrid_2d_cpu(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv,
         double h2, double jcap_tol, double w,
@@ -1433,7 +1481,7 @@ static at::Tensor poisson_solve_multigrid_2d_cpu(
     });
 }
 
-static at::Tensor poisson_solve_multigrid_3d_cpu(
+static std::tuple<at::Tensor, int64_t> poisson_solve_multigrid_3d_cpu(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv, at::Tensor cw,
         double h2, double jcap_tol, double w,
@@ -1547,7 +1595,7 @@ static at::Tensor mg_vcycle_3d_cpu(
 // MGCG and RMGCG CPU stubs — the whole-solve drivers.  On the CPU the CG loop
 // runs in Python (``PoissonSolver._cg_core``) against ``mg_vcycle_{2,3}d``
 // above, so these raise rather than duplicating that driver in C++.
-static at::Tensor poisson_solve_mgcg_2d_cpu(
+static std::tuple<at::Tensor, int64_t> poisson_solve_mgcg_2d_cpu(
         at::Tensor /*p*/, at::Tensor /*f*/,
         at::Tensor /*ch*/, at::Tensor /*cv*/,
         double /*h2*/, double /*jcap_tol*/, double /*w*/,
@@ -1557,10 +1605,10 @@ static at::Tensor poisson_solve_mgcg_2d_cpu(
     TORCH_CHECK(false,
         "poisson_solve_mgcg_2d CPU twin is not yet implemented. "
         "Use the Python MGCG path (PoissonSolver.solve_mgcg) on CPU.");
-    return at::Tensor{};
+    return std::make_tuple(at::Tensor{}, (int64_t)0);
 }
 
-static at::Tensor poisson_solve_mgcg_3d_cpu(
+static std::tuple<at::Tensor, int64_t> poisson_solve_mgcg_3d_cpu(
         at::Tensor /*p*/, at::Tensor /*f*/,
         at::Tensor /*ch*/, at::Tensor /*cv*/, at::Tensor /*cw*/,
         double /*h2*/, double /*jcap_tol*/, double /*w*/,
@@ -1570,7 +1618,7 @@ static at::Tensor poisson_solve_mgcg_3d_cpu(
     TORCH_CHECK(false,
         "poisson_solve_mgcg_3d CPU twin is not yet implemented. "
         "Use the Python MGCG path (PoissonSolver.solve_mgcg) on CPU.");
-    return at::Tensor{};
+    return std::make_tuple(at::Tensor{}, (int64_t)0);
 }
 
 static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cpu(

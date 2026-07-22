@@ -68,13 +68,26 @@ class FlowDiagnostics:
         # dissipation that the mu0 mask clips; equals dissipation_rate when no
         # mask is applied.  Useful as an upper bound for the energy-balance check.
         self.dissipation_rate_unmasked = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+        # Pressure-Poisson convergence.  ``poisson_residual`` is the L-inf
+        # residual the solve stopped at; compare it against poisson_tol to see
+        # whether the solve converged or simply ran out its cycle cap.
+        # ``poisson_iters`` is the iteration count (CG iterations, or V-cycles
+        # for standalone multigrid).  It is only informative when poisson_tol
+        # >= 0: a negative tol disables the early-exit test so the solve stays
+        # host-sync-free and graph-capturable, and the loop then always runs
+        # its full cycle cap.
+        self.poisson_residual = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+        self.poisson_iters    = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+        # max|div u| restricted to cells that are essentially pure fluid
+        # (mu0 > 0.99).  See the note where this is filled in update().
+        self.max_divergence_fluid = torch.full((nt,), float('nan'), device=device, dtype=dtype)
 
         self._ek0 = None   # E_k at the first computed step (baseline)
 
     # ------------------------------------------------------------------
     @torch.no_grad()
     def update(self, iteration, u, v, p, dt, nu, divergence_fn, vorticity_fn,
-               w=None, sdf_cc=None, mu_fn=None):
+               w=None, sdf_cc=None, mu_fn=None, poisson_solver=None):
         """Compute and record diagnostics for the current step.
 
         Parameters
@@ -150,12 +163,35 @@ class FlowDiagnostics:
         div = divergence_fn(u, v, w=w)
         self.max_divergence[iteration] = div.abs().max()
 
+        # Same maximum taken over the fluid only.  With a BDIM body the
+        # projection enforces div(u) = (1-mu0)*div(u_body), not div(u) = 0, so
+        # cells inside/straddling the body are legitimately non-solenoidal --
+        # and with overlapping links (convexify) that term is large.  The
+        # whole-grid maximum above is therefore dominated by the body and says
+        # little about solver health; this one is the number to watch.
+        if sdf_cc is not None and mu_fn is not None:
+            try:
+                mu0_div, _ = mu_fn(sdf_cc)
+                if mu0_div.shape == div.shape:
+                    self.max_divergence_fluid[iteration] = (
+                        div.abs()[mu0_div > 0.99].max()
+                    )
+            except Exception:
+                pass
+
         # ---- CFL = u_max * dt / h ----
         vel_max = u.abs().max()
         vel_max = max(vel_max, v.abs().max())
         if w is not None:
             vel_max = max(vel_max, w.abs().max())
         self.cfl_number[iteration] = float(vel_max) * dt_val / h
+
+        # ---- pressure-Poisson convergence ----
+        if poisson_solver is not None:
+            resid = getattr(poisson_solver, "_last_resid", None)
+            if resid is not None:
+                self.poisson_residual[iteration] = resid
+            self.poisson_iters[iteration] = getattr(poisson_solver, "_last_niter", -1)
 
         # ---- energy blow-up warning ----
         if self._ek0 is None:
@@ -188,6 +224,9 @@ class FlowDiagnostics:
             "cfl_number":      self.cfl_number.cpu().numpy().copy(),
             "dissipation_rate": self.dissipation_rate.cpu().numpy().copy(),
             "dissipation_rate_unmasked": self.dissipation_rate_unmasked.cpu().numpy().copy(),
+            "poisson_residual": self.poisson_residual.cpu().numpy().copy(),
+            "poisson_iters":    self.poisson_iters.cpu().numpy().copy(),
+            "max_divergence_fluid": self.max_divergence_fluid.cpu().numpy().copy(),
         }
         with lock:
             with h5py.File(h5_path, "w") as f:
