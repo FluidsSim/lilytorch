@@ -1,7 +1,0 @@
-newmtl sphere_stripes
-Ka 1 1 1
-Kd 1 1 1
-Ks 0.3 0.3 0.3
-Ns 64
-d 1
-map_Kd _stripe_texture_sphere_light.png

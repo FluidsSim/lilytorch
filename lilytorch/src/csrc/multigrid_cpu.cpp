@@ -104,7 +104,7 @@ template <typename scalar_t>
 // Seidel is not self-adjoint, so a V-cycle that pre- and post-smooths in the
 // same colour order is NON-SYMMETRIC and invalid as a CG preconditioner; the
 // post-smooth of a variational V-cycle passes reverse=true to make the pair
-// A-adjoint.  See lilytorch/tests/check_poisson_symmetry.py.
+// A-adjoint.  See lilytorch_examples/tests/check_poisson_symmetry.py.
 static void rbgs_sweep_2d_cpu_impl(
         scalar_t* p, const scalar_t* f,
         const scalar_t* cp0, const scalar_t* cm0,
