@@ -73,10 +73,11 @@ python -m lilytorch_examples.examples.standalone.runsim \
   flow_past_circle_2d.yaml
 ```
 
-Run LilyTorch's package tests with:
+Run LilyTorch's companion test suite from the directory containing both
+checkouts with:
 
 ```bash
-python -m pytest lilytorch/tests
+python -m pytest lilytorch_examples/lilytorch_examples/tests
 ```
 
 The production implementation uses native CPU/CUDA operators. There is no

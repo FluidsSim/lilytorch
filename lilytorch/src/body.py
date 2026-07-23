@@ -1448,6 +1448,13 @@ class BodyAnalytical(Body):
 
         (transl, rot) = self.rototranslate_points(t)
         R_T = rot.T
+        # Cache the pose so the eulerian force kernels can pack a `kin` row for
+        # analytical bodies without re-deriving it from the update maps (which
+        # would need `t`, and the force pass only gets `iteration`).  The BDIM
+        # handler supplies this for mesh bodies via `gather_data`; analytical
+        # bodies are driven straight from the solver and have no handler.
+        self._pose_transl = transl
+        self._pose_rot = rot
 
         # --- linear / angular velocities via autograd ------------------
         t_var = t.clone().detach().requires_grad_(True)
@@ -1469,6 +1476,8 @@ class BodyAnalytical(Body):
             lin_vel_x = _safe_grad(vx, t_var)
             lin_vel_y = _safe_grad(vy, t_var)
             ang_vel = _safe_grad(w, t_var)
+            self._pose_lin_vel = (lin_vel_x, lin_vel_y)
+            self._pose_ang_vel = ang_vel
 
             # SDF at cell-centres (meshgrid broadcasting)
             # Every published field goes through _publish: the pre-Poisson CUDA

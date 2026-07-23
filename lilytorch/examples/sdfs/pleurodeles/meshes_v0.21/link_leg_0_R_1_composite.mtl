@@ -1,8 +1,0 @@
-# ('FARMS composite mesh',)
-
-newmtl link_leg_0_R_1_composite
-Ka 0.40000000 0.40000000 0.40000000
-Kd 0.40000000 0.40000000 0.40000000
-Ks 0.40000000 0.40000000 0.40000000
-Ns 1.00000000
-map_Kd link_leg_0_R_1_composite.png

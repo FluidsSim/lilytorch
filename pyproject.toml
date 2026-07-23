@@ -58,6 +58,3 @@ Repository = "https://github.com/FluidsSim/lilytorch"
 
 [tool.setuptools.packages.find]
 include = ["lilytorch*"]
-
-[tool.pytest.ini_options]
-testpaths = ["lilytorch/tests"]

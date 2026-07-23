@@ -317,7 +317,7 @@ class _MultigridPoissonSolver:
         ``prolongate_add`` writes the coarse correction into EVERY fine cell on
         the way up — a zero column against a non-zero row.  Masking the output
         restores M = Mᵀ (verified to 4e-16 by
-        ``lilytorch/tests/check_poisson_symmetry.py``).
+        ``lilytorch_examples/tests/check_poisson_symmetry.py``).
         """
         z.zero_()
         for _ in range(self.precond_vcycles):

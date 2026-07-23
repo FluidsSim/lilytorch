@@ -254,7 +254,7 @@ __global__ void rbgs_2d_tiled_kernel(
     // invalid for a CG preconditioner (measured ~5e-2 relative asymmetry,
     // with no degenerate cells involved).  Reversing the post-smooth makes
     // the pair adjoint and the cycle symmetric.  See
-    // ``lilytorch/tests/check_poisson_symmetry.py``.
+    // ``lilytorch_examples/tests/check_poisson_symmetry.py``.
     const int color = ((gi + gj) & 1) ^ (reverse ? 1 : 0);
 
     // ── nsmoothing full RBGS sweeps in shared memory ──────────────────
