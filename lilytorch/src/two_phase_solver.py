@@ -352,11 +352,10 @@ class TwoPhaseSolver(FluidSolver):
             self._rho_solid = float(self._rho_solid)
         # Air-transparent body: mask the BDIM fluid fraction mu0 by the water
         # fraction alpha so the body effectively does NOT exist in the air phase.
-        # Uses a SHARP threshold at alpha=0.5 (the VOF interface): the body is
-        # fully present on the water side (alpha>=0.5 -> mu0_eff=mu0) and fully
-        # transparent on the air side (alpha<0.5 -> mu0_eff=1).  This eliminates
-        # the air-water-body triple-point singularity without creating a "half-
-        # present" body zone at the waterline that can cause its own instability.
+        # Uses the resolved VOF fraction continuously: the body is fully present
+        # in water (alpha=1), transparent in air (alpha=0), and transitions over
+        # the same interface band as the material properties.  Keeping this
+        # coefficient continuous avoids grid-scale forcing at the contact line.
         # Physically motivated: air forces on the body are ~1000x smaller than
         # water forces, so ignoring the above-water body is an excellent
         # approximation.  Default ON; set to False to restore legacy behaviour.
@@ -452,7 +451,8 @@ class TwoPhaseSolver(FluidSolver):
                 getattr(self, f'normal_{n}_{ax}')
                 for n in self._bdim_normal_names
             )
-            # Mask mu0, mu1 by the fluid-part water fraction on this face grid
+            # Mask mu0, mu1 continuously by the resolved fluid-part water
+            # fraction on this face grid.
             a_face = self._face_mean(a_f, i)
             # mu0_eff = alpha*mu0 + (1-alpha) → 1 in air, mu0 in water
             mu0_eff = a_face * mu0 + (1.0 - a_face)
@@ -617,16 +617,25 @@ class TwoPhaseSolver(FluidSolver):
         # ── Prevent singular operator inside large bodies ────────────
         # μ₀ → 0 inside the body → c = dt·μ₀/ρ → 0 → div(0·grad(p)) is
         # singular.  Multigrid stalls on large connected zero-coefficient
-        # regions.  Clamp to a tiny floor (1e-4 × dt/ρ_water) so the
-        # operator is stiff but never fully degenerate.  BDIM already
-        # overrides velocities inside the body, so the effect on physics
-        # is zero.
+        # regions.  The compatibility default is capped at the liquid
+        # coefficient dt/ρ_water. BDIM already overrides velocities inside the
+        # body, so extending that coefficient through its deep interior does
+        # not alter the fluid correction and keeps the operator conditioned.
+        #
+        # This MUST scale with dt.  The old absolute 1e-6 happened to equal
+        # dt/ρ_water for dt=1e-3, but at finer grids (dt∝h) it clipped even the
+        # open-water coefficient.  At N=96, dt/ρ_water=7.05e-7, producing the
+        # observed pressure/force factor 7.05e-7/1e-6 ≈ 0.707.
         import os
         _floor_str = os.environ.get("LILYTORCH_COEFF_FLOOR")
         if _floor_str is not None:
             _floor = float(_floor_str)
+        elif tp.rho_water == tp.rho_air:
+            # Preserve the exact uniform-density reduction to FluidSolver,
+            # whose BDIM coefficient is not floored.
+            _floor = 0.0
         else:
-            _floor = 1e-6  # = dt/ρ_water — prevents degenerate op inside bodies
+            _floor = min(1e-6, dt / tp.rho_water)
         if _floor > 0.0:
             out = tuple(torch.clamp(c, min=_floor) if isinstance(c, torch.Tensor) else c
                         for c in out)
