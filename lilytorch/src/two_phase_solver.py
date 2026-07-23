@@ -730,7 +730,60 @@ class TwoPhaseSolver(FluidSolver):
                 (self.forces_lagrangian_3d if lagrangian
                  else self.forces_method2_3d)(u, v, w_vel, p, iteration)
 
+        self._maybe_dump_band(p, iteration)
         return u, v, p, w_vel
+
+    def _maybe_dump_band(self, p, iteration):
+        """Opt-in one-shot dump of everything the eulerian buoyancy is built
+        from, so the band quadrature can be recomputed offline and checked
+        against what the kernel actually returned.
+
+        Set ``LILYTORCH_BAND_DUMP=<iteration>`` (and optionally
+        ``LILYTORCH_BAND_DUMP_PATH``).  Off by default and untouched otherwise.
+
+        The point of the dump is to split the two candidate causes of the
+        vertical-force deficit apart.  The eulerian pressure force is
+        ``F_i = sum (-p) d_i H_eps(phi) h^3``; recomputing that sum offline from
+        the same p and phi and comparing against the kernel's own answer says
+        whether the QUADRATURE is wrong (they disagree) or the PRESSURE FIELD is
+        (they agree but neither equals rho*g*V).
+        """
+        import os
+        want = os.environ.get("LILYTORCH_BAND_DUMP")
+        if want is None or int(want) != int(iteration):
+            return
+        import numpy as np
+        comp = self.composite_body
+        path = os.environ.get("LILYTORCH_BAND_DUMP_PATH", "band_dump.npz")
+        out = {
+            "p": p.detach().cpu().numpy(),
+            "sdf": comp.sdf_val.detach().cpu().numpy(),
+            "alpha": self.two_phase.alpha.detach().cpu().numpy(),
+            "eps": float(comp.eps),
+            "h": float(self.h),
+            "iteration": int(iteration),
+            "x": np.asarray(comp.x.detach().cpu()),
+            "y": np.asarray(comp.y.detach().cpu()),
+            "z": np.asarray(comp.z.detach().cpu()),
+            "rho_water": float(self.two_phase.rho_water),
+            "rho_air": float(self.two_phase.rho_air),
+            "gravity": np.asarray(
+                [] if self._gravity is None else
+                (self._gravity.detach().cpu() if hasattr(self._gravity, "detach")
+                 else self._gravity), dtype=float),
+            "force_submethod": int(getattr(self, "force_submethod", 0)),
+            "eul_off_pressure": float(self.eul_sample_offset_pressure),
+        }
+        for name in ("pressure_force_x", "pressure_force_y", "pressure_force_z",
+                     "friction_force_lin_x", "friction_force_lin_y",
+                     "friction_force_lin_z"):
+            v = getattr(self, name, None)
+            if v is not None:
+                out[name] = np.asarray(
+                    v.detach().cpu() if hasattr(v, "detach") else v)
+        np.savez_compressed(path, **out)
+        print(f"[band-dump] iteration {iteration} -> {path} "
+              f"({out['sdf'].shape}, eps={out['eps']:.5g}, h={out['h']:.5g})")
 
     def _build_hydrostatic_reference(self):
         """Two-phase density is variable (water/air VOF blend), so the

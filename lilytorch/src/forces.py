@@ -31,6 +31,212 @@ from lilytorch.src.native import (
 
 
 # ======================================================================
+# Streaming metadata for solver-driven (handler-less) analytical bodies
+# ======================================================================
+#
+# The eulerian force kernels read their per-body descriptors from
+# ``comp._kernel_static_{2,3}d`` / ``comp._kernel_step``, which the BDIM handler
+# packs every step from the FARMS pose buffers.  A ``composite_analytical`` body
+# driven straight from the solver (the two-phase validation scripts, the force
+# oracles) never goes through the handler, so those attributes were absent and
+# the force functions used to ``return`` silently -- leaving every load at
+# exactly zero with no warning.  That is what broke
+# ``validation/two_phase_2d/run_floating_cylinder.py`` (F_y = 0, 100 % error),
+# which is the case the "floating cylinder 0.91x Archimedes" claim rests on.
+#
+# Analytical bodies can supply everything the kernels need: the SDF is a
+# callable, ``local_aabb`` bounds it, and ``BodyAnalytical.update`` now caches
+# the pose (``_pose_rot`` / ``_pose_transl``) and velocities.  So build the same
+# packed layout here instead of bailing out.  The handler path is untouched: if
+# it has already populated the attributes, these helpers never run.
+
+
+def _analytical_stream_static(self, comp, D):
+    """Pack the static per-body descriptors (``F_flat`` / ``F_offsets`` /
+    ``body_shapes`` / ``body_meta``) for analytical bodies.
+
+    Mirrors ``BDIMhandler._stream_static_pack``; the per-body local SDF template
+    is sampled from the callable on a grid derived from ``local_aabb``, exactly
+    as ``BDIMhandler._build_stream_meta`` does for its analytical branch.
+    """
+    attr = '_kernel_static_3d' if D == 3 else '_kernel_static_2d'
+    cached = getattr(comp, attr, None)
+    if cached is not None:
+        return cached
+    h = float(self.h)
+    anames = ('x', 'y', 'z')[:D]
+    for body in comp.bodies:
+        if getattr(body, '_stream_meta', None) is not None:
+            continue
+        sdf_callable = getattr(body, 'sdf', None)
+        local_aabb = getattr(body, 'local_aabb', None)
+        if sdf_callable is None or local_aabb is None:
+            return None
+        # Pad the template box by the full BDIM band before sampling.
+        # ``BodyAnalytical.local_aabb`` is fitted TIGHT to the surface contour
+        # (body.py builds it from cnt min/max with no margin), but the kernel
+        # queries the template at every cell of the force AABB, which reaches
+        # eps + 4h beyond the surface.  Unpadded, those queries clamp to the
+        # box edge and read a body-local SDF that is far too small, so the
+        # partition of unity drops the cell and its share of the force is
+        # simply lost.  The handler's mesh branch pads for the same reason
+        # (``local_aabb_lo = cnt.min - (eps + 4h)``).
+        pad = float(comp.eps) + 4.0 * h
+        lo = local_aabb[0].cpu() - pad
+        hi = local_aabb[1].cpu() + pad
+        # h/2 sampling, matching the handler's analytical branch.
+        sizes = [max(2, int(round(float(hi[i] - lo[i]) / (0.5 * h))) + 1)
+                 for i in range(D)]
+        axes = tuple(
+            torch.linspace(float(lo[i]), float(hi[i]), sizes[i],
+                           dtype=self.dtype, device=self.device)
+            for i in range(D)
+        )
+        with torch.no_grad():
+            F = sdf_callable(*torch.meshgrid(*axes, indexing='ij')).contiguous()
+        inv = [1.0 / float(a[1] - a[0]) if a.numel() > 1 else 1.0 for a in axes]
+        meta = {'F': F}
+        for i, a in enumerate(anames):
+            meta[f'b{a}0'] = float(axes[i][0])
+            meta[f'b{a}_last'] = float(axes[i][-1])
+            meta[f'inv_d{a}'] = inv[i]
+        meta['inv_vol'] = float(np_prod(inv))
+        body._stream_meta = meta
+
+    F_chunks, F_off, shapes, meta_rows = [], [0], [], []
+    for body in comp.bodies:
+        m = body._stream_meta
+        F_chunks.append(m['F'].flatten())
+        F_off.append(F_off[-1] + m['F'].numel())
+        shapes.append([int(s) for s in m['F'].shape])
+        meta_rows.append(
+            [m[f'b{a}0'] for a in anames]
+            + [m[f'b{a}_last'] for a in anames]
+            + [m[f'inv_d{a}'] for a in anames]
+            + [m['inv_vol']]
+        )
+    F_flat = torch.cat(F_chunks).contiguous()
+    for b, body in enumerate(comp.bodies):
+        body._stream_meta['F'] = F_flat[F_off[b]:F_off[b + 1]].view(*shapes[b])
+    sm = {
+        'F_flat': F_flat,
+        'F_offsets': torch.tensor(F_off, dtype=torch.int64, device=self.device),
+        'body_shapes': torch.tensor(shapes, dtype=torch.int64, device=self.device),
+        'body_meta': torch.tensor(meta_rows, dtype=self.dtype, device=self.device),
+    }
+    setattr(comp, attr, sm)
+    return sm
+
+
+def np_prod(vals):
+    out = 1.0
+    for v in vals:
+        out *= v
+    return out
+
+
+def _analytical_stream_step(self, comp, D):
+    """Pack the per-step ``kin`` / AABB tensors for analytical bodies.
+
+    ``kin`` row layout is fixed by the kernels and must match
+    ``BDIMhandler._update_streaming_multi`` exactly::
+
+        [R^T (D*D) | body_pos (D) | com_pos (D) | lin_vel (D) | ang (3|1)]
+    """
+    B = len(comp.bodies)
+    anames = ('x', 'y', 'z')[:D]
+    g_1d = tuple(getattr(comp, f'g{a}_1d', None) for a in anames)
+    if any(g is None for g in g_1d):
+        g_1d = tuple(getattr(comp, a) for a in anames)
+    gs = tuple(int(g.numel()) for g in g_1d)
+
+    wRT = D * D
+    ang_w = 3 if D == 3 else 1
+    kin = torch.zeros((B, wRT + 3 * D + ang_w), dtype=self.dtype,
+                      device=self.device)
+    i_lo = torch.zeros((B, D), dtype=torch.int64)
+    i_hi = torch.zeros((B, D), dtype=torch.int64)
+    h = float(self.h)
+    band = float(comp.eps) + 4.0 * h
+
+    for b, body in enumerate(comp.bodies):
+        rot = getattr(body, '_pose_rot', None)
+        transl = getattr(body, '_pose_transl', None)
+        if rot is None or transl is None:
+            return None
+        R = rot.to(dtype=self.dtype, device=self.device)
+        kin[b, 0:wRT] = R.T.reshape(-1)
+        pos = torch.as_tensor([float(transl[i]) for i in range(D)],
+                              dtype=self.dtype, device=self.device)
+        o = wRT
+        kin[b, o:o + D] = pos; o += D
+        com = getattr(body, 'com_pos', None)
+        kin[b, o:o + D] = (com[:D].to(self.dtype) if com is not None
+                           and com.numel() >= D else pos)
+        o += D
+        lv = getattr(body, '_pose_lin_vel', None)
+        if lv is not None:
+            for i in range(min(D, len(lv))):
+                kin[b, o + i] = float(lv[i])
+        o += D
+        av = getattr(body, '_pose_ang_vel', None)
+        if av is not None and ang_w == 1:
+            kin[b, o] = float(av)
+
+        # World AABB: local box corners rotated into world, plus the BDIM band.
+        la = getattr(body, 'local_aabb', None)
+        lo_l = la[0].to(self.dtype).cpu()
+        hi_l = la[1].to(self.dtype).cpu()
+        corners = torch.cartesian_prod(
+            *[torch.stack([lo_l[i], hi_l[i]]) for i in range(D)])
+        corners = corners.reshape(-1, D).to(self.dtype)
+        world = (R.cpu() @ corners.T).T + pos.cpu()
+        wlo = world.min(dim=0).values - band
+        whi = world.max(dim=0).values + band
+        for i in range(D):
+            g = g_1d[i]
+            g0 = float(g[0])
+            i_lo[b, i] = int(max(0, math.floor((float(wlo[i]) - g0) / h)))
+            i_hi[b, i] = int(min(gs[i], math.ceil((float(whi[i]) - g0) / h) + 1))
+    i_hi = torch.maximum(i_hi, i_lo)
+    dims = i_hi - i_lo
+    kstep = {
+        'kin': kin,
+        'aabb_lo': i_lo.to(self.device),
+        'aabb_dim': dims.to(self.device),
+        'max_vol': int(dims.prod(dim=1).max()) if B > 0 else 0,
+    }
+    for i, a in enumerate(anames):
+        kstep[f'g{a}'] = g_1d[i]
+    comp._kernel_step = kstep
+    return kstep
+
+
+def _require_stream_meta(self, comp, D):
+    """Return ``(static, step)`` for the eulerian force kernels, building them
+    for handler-less analytical bodies. Raises rather than silently returning
+    zero loads (the lagrangian path raises on its own missing contract too)."""
+    attr = '_kernel_static_3d' if D == 3 else '_kernel_static_2d'
+    step = getattr(comp, '_kernel_step', None)
+    static = getattr(comp, attr, None)
+    if step is not None and static is not None:
+        return static, step
+    static = _analytical_stream_static(self, comp, D)
+    step = _analytical_stream_step(self, comp, D) if static is not None else None
+    if static is None or step is None:
+        raise RuntimeError(
+            f"force_method='eulerian' needs per-body streaming metadata "
+            f"({attr} / _kernel_step). The BDIM handler supplies it for mesh "
+            "bodies; analytical bodies need a callable `sdf` and `local_aabb`, "
+            "and must have been update()d at least once so the pose is cached. "
+            f"Body types present: "
+            f"{[type(b).__name__ for b in comp.bodies]}. "
+            "Use force_method='lagrangian' if the body cannot provide these."
+        )
+    return static, step
+
+
+# ======================================================================
 # Methods bound to FluidSolver (take ``self`` as first argument).
 # ======================================================================
 
@@ -39,10 +245,7 @@ def forces_method2(self, u, v, p, iteration):
     comp = self.composite_body
     B = len(comp.bodies)
 
-    _stream_step = getattr(comp, '_kernel_step', None)
-    sm = getattr(comp, '_kernel_static_2d', None)
-    if _stream_step is None or sm is None:
-        return  # streaming metadata not available (non-streaming body)
+    sm, _stream_step = _require_stream_meta(self, comp, 2)
 
     out2d = getattr(self, '_kernel_post_out_buf_2d', None)
     _fresh_out = out2d is None or out2d.shape != (B, 6)
@@ -146,10 +349,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     # here from the current fluid fields and current union normals, with
     # per-body deltas obtained by on-demand body-local SDF sampling.
     # ============================================================
-    _stream_step = getattr(comp, '_kernel_step', None)
-    _stream_static = getattr(comp, '_kernel_static_3d', None)
-    if _stream_step is None or _stream_static is None:
-        return  # streaming metadata not available (non-streaming body)
+    _stream_static, _stream_step = _require_stream_meta(self, comp, 3)
     B = len(comp.bodies)
     out = getattr(self, '_kernel_post_out_buf_3d', None)
     _fresh_out = out is None or out.shape != (B, 12)
