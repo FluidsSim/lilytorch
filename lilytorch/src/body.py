@@ -1,5 +1,6 @@
 
 import logging
+import itertools
 import math  # used for evaluating math operations for sdfs
 import os
 
@@ -1118,9 +1119,15 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None, triangulate=None, surface_h=None, surface_aabb=None):
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None, triangulate=None, surface_h=None, surface_aabb=None, contour=None):
         super().__init__(device, x, y, z=z, eps=eps)
         self.sdf = sdf
+        # Optional pre-extracted 2-D contour, as a ``(2, N)`` array in body-local
+        # coordinates.  One body is one closed loop (the Lagrangian kernel wraps
+        # around each body's markers), so a link whose union has several loops
+        # is built as several bodies that SHARE this composite SDF and differ
+        # only in which loop each carries.
+        self._contour = contour
         # Optional dedicated grid for the Lagrangian surface extraction.  When
         # both are None the surface comes off the fluid grid, which cannot see a
         # geom smaller than a cell; a composite body sets them so its surface
@@ -1162,19 +1169,24 @@ class BodyAnalytical(Body):
         xcnt = self.x - xmid
         ycnt = self.y - ymid
 
-        X, Y = torch.meshgrid(xcnt, ycnt, indexing="ij")
-        sdf_cnt = self.sdf(X, Y)
+        if self._contour is not None:
+            # Loop supplied by the caller, already in body-local coordinates.
+            cnt = np.array(self._contour, dtype=float)
+            sdf_np = None
+        else:
+            X, Y = torch.meshgrid(xcnt, ycnt, indexing="ij")
+            sdf_cnt = self.sdf(X, Y)
 
-        sdf_np = sdf_cnt.cpu().numpy()
-        xnp = xcnt.cpu().numpy()
-        ynp = ycnt.cpu().numpy()
+            sdf_np = sdf_cnt.cpu().numpy()
+            xnp = xcnt.cpu().numpy()
+            ynp = ycnt.cpu().numpy()
 
-        cnt = np.array(_pick_contour(
-            measure.find_contours(sdf_np - self.h, 0),
-            f"body '{getattr(self, 'name', type(self).__name__)}'",
-        )).T
-        cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
-        cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
+            cnt = np.array(_pick_contour(
+                measure.find_contours(sdf_np - self.h, 0),
+                f"body '{getattr(self, 'name', type(self).__name__)}'",
+            )).T
+            cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
+            cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
 
         ds = self.h
         x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
@@ -1211,7 +1223,7 @@ class BodyAnalytical(Body):
             cnt_hi = self.cnt.max(dim=1).values + band_margin
             self.local_aabb = torch.stack([cnt_lo, cnt_hi], dim=0)
 
-        if self.plotting:
+        if self.plotting and sdf_np is not None:
             _, plt, cm = _import_matplotlib()
             plt.imshow(
                 sdf_np.T,
@@ -2638,6 +2650,66 @@ class MultiAnimatBodies(Body):
     #: Accepted values for the ``geometry_source`` constructor argument.
     GEOMETRY_SOURCES = ("collision", "visual", "auto")
 
+    def _child_boxes(self, body, D, band_margin):
+        """``(padded_box, raw_box)`` of one geom, in its OWN frame.
+
+        Both are ``[lo[], hi[]]`` lists of scalars.  The padded box is what the
+        BDIM band needs; the raw box is the geometry's true extent and is what
+        the surface resolution must be judged against.  Sources differ by body
+        type -- analytical geoms carry ``local_aabb``/``bb``, mesh geoms carry
+        only ``bb`` and a contour -- so both are derived here rather than
+        assumed.  Returns ``None`` if the geom cannot bound itself.
+        """
+        def _split(lo_vals, hi_vals):
+            to_t = lambda v: torch.tensor(
+                float(v), device=self.device, dtype=self.dtype)
+            return [[to_t(v) for v in lo_vals], [to_t(v) for v in hi_vals]]
+
+        raw_bb = getattr(body, "bb", None)
+        raw = None
+        if raw_bb is not None and len(raw_bb) >= D:
+            try:
+                raw = _split([raw_bb[a][0] for a in range(D)],
+                             [raw_bb[a][1] for a in range(D)])
+            except (TypeError, IndexError):
+                raw = None
+        if raw is None:
+            cnt = getattr(body, "cnt", None)
+            if cnt is None or cnt.numel() <= D:
+                return None
+            cnt_lo = cnt.min(dim=1).values
+            cnt_hi = cnt.max(dim=1).values
+            raw = _split([cnt_lo[a] for a in range(D)],
+                         [cnt_hi[a] for a in range(D)])
+
+        local_aabb = getattr(body, "local_aabb", None)
+        if local_aabb is not None:
+            padded = _split([local_aabb[0, a] for a in range(D)],
+                            [local_aabb[1, a] for a in range(D)])
+        else:
+            padded = _split([float(raw[0][a]) - band_margin for a in range(D)],
+                            [float(raw[1][a]) + band_margin for a in range(D)])
+        return padded, raw
+
+    @staticmethod
+    def _child_table_bounds(body, D):
+        """Valid interpolation box of a TABLE-backed geom, or ``None``.
+
+        A tabulated SDF clamps outside its sampled axes, so beyond them it
+        reports the box-edge distance rather than the true one.  The union has
+        to know where to stop trusting it.
+        """
+        if not hasattr(body, "mesh_file"):
+            return None                      # analytical: valid everywhere
+        table = getattr(body, "sdf", None)
+        axes = [getattr(table, name, None) for name in ("x", "y", "z")[:D]]
+        if any(axis is None or len(axis) < 2 for axis in axes):
+            return None
+        return (
+            torch.stack([axis[0].detach() for axis in axes]),
+            torch.stack([axis[-1].detach() for axis in axes]),
+        )
+
     def _link_composite_body(self, link_bodies, link_name, sdf_path,
                              initial_pose, eps):
         """Collapse a link's per-geom bodies into ONE composite body (3-D).
@@ -2657,51 +2729,46 @@ class MultiAnimatBodies(Body):
         pressure from the body interior.  (The Eulerian readout is immune: it
         integrates the union SDF and partitions the result.)
 
+        In 2-D the union is built the same way, but the Lagrangian kernel wraps
+        around each body's markers, so one body is one closed loop: the union
+        contour is split into its connected loops and one body is emitted per
+        loop, all sharing this SDF and all mapping to the same link.  Collapsing
+        also fixes 2-D geom placement outright, because the 2-D update path
+        ignores ``local_pose`` and so used to stack every geom of a link on the
+        link origin.
+
         Returns ``None`` when the link cannot be collapsed, so the caller keeps
         the per-geom bodies.
         """
-        if len(link_bodies) <= 1 or self.ndim != 3:
-            # 2-D bodies are contour-based and the Lagrangian kernel treats one
-            # body as one closed CCW loop, so a link whose union is
-            # disconnected cannot be a single 2-D body.
+        D = self.ndim
+        if len(link_bodies) <= 1:
             return None
-
-        # A tabulated (mesh) child clamps its interpolator outside its own box,
-        # and a clamped-small value would win the ``min`` and eat its siblings.
-        # Masking each child to +inf outside its own AABB would fix it; until
-        # then say so rather than silently corrupting the union.
-        tabulated = sorted({b.collision_name or "?" for b in link_bodies
-                            if hasattr(b, "mesh_file")})
-        if tabulated:
-            raise ValueError(
-                f"Link '{link_name}' of '{sdf_path}' has {len(link_bodies)} "
-                f"geoms including mesh geometry ({', '.join(tabulated)}). "
-                "Unioning a mesh with sibling geoms is not supported yet: give "
-                "the link a single mesh geom, or make its geoms all primitives."
-            )
 
         Rotation = _import_rotation()
         rots, transls = [], []
         for body in link_bodies:
             local_pose = np.asarray(body.local_pose, dtype=float)
+            matrix = Rotation.from_euler("xyz", local_pose[3:]).as_matrix()
+            # 2-D keeps the in-plane block: an out-of-plane tilt has no
+            # meaningful 2-D cross-section, and the per-geom path it replaces
+            # discarded the whole pose anyway.
             rots.append(torch.tensor(
-                Rotation.from_euler("xyz", local_pose[3:]).as_matrix(),
-                device=self.device, dtype=self.dtype,
+                matrix[:D, :D], device=self.device, dtype=self.dtype,
             ))
             transls.append(torch.tensor(
-                local_pose[:3], device=self.device, dtype=self.dtype,
+                local_pose[:D], device=self.device, dtype=self.dtype,
             ))
 
-        # Union AABB: every child's own (already band-padded) box, its eight
-        # corners carried into the link frame.  Bail out if any child cannot
-        # bound itself, since an unbounded composite would have to be evaluated
-        # over the whole grid.
-        corner_ids = [(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)]
+        # Union AABB: every child's own (already band-padded) box, its corners
+        # carried into the link frame.  Bail out if any child cannot bound
+        # itself, since an unbounded composite would have to be evaluated over
+        # the whole grid.
+        corner_ids = list(itertools.product((0, 1), repeat=D))
 
         def _to_link_frame(box, rot, transl):
-            """Link-frame (lo, hi) of a child-frame ``(2, 3)``-style box."""
+            """Link-frame (lo, hi) of a child-frame box given as [lo[], hi[]]."""
             pts = torch.stack([
-                torch.stack([box[corner[a]][a] for a in range(3)])
+                torch.stack([box[corner[a]][a] for a in range(D)])
                 for corner in corner_ids
             ]) @ rot.T + transl
             return pts.min(dim=0).values, pts.max(dim=0).values
@@ -2712,20 +2779,21 @@ class MultiAnimatBodies(Body):
         # geometry actually is: for a sub-cell geom the padding is the box.  The
         # children's ``bb`` carries the raw half-extents, so the surface grid is
         # sized and bounded from that instead.
+        band_margin = float(self.eps) + 4.0 * float(self.h)
         pad_lo_all, pad_hi_all, raw_lo_all, raw_hi_all = [], [], [], []
         for body, rot, transl in zip(link_bodies, rots, transls):
-            local_aabb = getattr(body, "local_aabb", None)
-            raw_bb = getattr(body, "bb", None)
-            if local_aabb is None or raw_bb is None or len(raw_bb) < 3:
+            boxes = self._child_boxes(body, D, band_margin)
+            if boxes is None:
+                print(
+                    f"  Link '{link_name}' of '{sdf_path}': keeping "
+                    f"{len(link_bodies)} per-geom bodies -- geom "
+                    f"'{getattr(body, 'collision_name', None) or '?'}' does not "
+                    "bound itself (no local_aabb, bb or contour), so its union "
+                    "with its siblings cannot be bounded."
+                )
                 return None
-            box = local_aabb.to(device=self.device, dtype=self.dtype)
-            pad_lo, pad_hi = _to_link_frame(
-                [[box[0, a] for a in range(3)], [box[1, a] for a in range(3)]],
-                rot, transl,
-            )
-            raw = [[float(raw_bb[a][side]) for a in range(3)] for side in (0, 1)]
-            raw_box = [[torch.tensor(v, device=self.device, dtype=self.dtype)
-                        for v in side] for side in raw]
+            (pad_box, raw_box) = boxes
+            pad_lo, pad_hi = _to_link_frame(pad_box, rot, transl)
             raw_lo, raw_hi = _to_link_frame(raw_box, rot, transl)
             pad_lo_all.append(pad_lo); pad_hi_all.append(pad_hi)
             raw_lo_all.append(raw_lo); raw_hi_all.append(raw_hi)
@@ -2750,59 +2818,155 @@ class MultiAnimatBodies(Body):
         n_samples = float(torch.prod(
             (surface_hi - surface_lo).clamp(min=0.0) / surface_h + 5.0))
         if n_samples > _MAX_SURFACE_SAMPLES:
-            surface_h *= (n_samples / _MAX_SURFACE_SAMPLES) ** (1.0 / 3.0)
+            surface_h *= (n_samples / _MAX_SURFACE_SAMPLES) ** (1.0 / D)
         # Keep the zero level set strictly interior to the surface box.
         margin = 3.0 * surface_h
         surface_aabb = torch.stack([surface_lo - margin, surface_hi + margin])
 
+        # A tabulated (mesh) child interpolates on its own sampled box and
+        # CLAMPS outside it, so far from the mesh it reports the box-edge
+        # distance -- a small value that would win the ``min`` and carve
+        # phantom geometry out of its siblings.  Clamp such a child to its own
+        # AABB and, outside, substitute band_margin + distance-to-AABB.  That
+        # is guaranteed not to under-report (the AABB is padded by the band, so
+        # the true distance there already exceeds band_margin), and anything
+        # beyond the band is equivalent for BDIM regardless of its exact value.
+        masks = []
+        for body in link_bodies:
+            bounds = self._child_table_bounds(body, D)
+            masks.append(None if bounds is None else (
+                bounds[0].to(device=self.device, dtype=self.dtype),
+                bounds[1].to(device=self.device, dtype=self.dtype),
+            ))
+
         children = tuple(
-            (body.sdf, rot, transl)
-            for body, rot, transl in zip(link_bodies, rots, transls)
+            (body.sdf, rot, transl, mask)
+            for body, rot, transl, mask in zip(
+                link_bodies, rots, transls, masks)
         )
 
-        def _composite_sdf(*q, _children=children):
+        def _composite_sdf(*q, _children=children, _band=band_margin):
             """min over geoms, each evaluated in its own local frame."""
             union = None
-            for sdf_child, rot, transl in _children:
-                dx, dy, dz = (q[a] - transl[a] for a in range(3))
+            n = len(_children[0][1])
+            for sdf_child, rot, transl, mask in _children:
+                delta = [q[a] - transl[a] for a in range(n)]
                 # rot.T @ (q - transl), i.e. contract along rot's columns.
-                dist = sdf_child(
-                    rot[0, 0] * dx + rot[1, 0] * dy + rot[2, 0] * dz,
-                    rot[0, 1] * dx + rot[1, 1] * dy + rot[2, 1] * dz,
-                    rot[0, 2] * dx + rot[1, 2] * dy + rot[2, 2] * dz,
+                local = tuple(
+                    sum(rot[r, c] * delta[r] for r in range(n))
+                    for c in range(n)
                 )
+                if mask is None:
+                    dist = sdf_child(*local)
+                else:
+                    lo_c, hi_c = mask
+                    clamped = tuple(
+                        local[a].clamp(float(lo_c[a]), float(hi_c[a]))
+                        for a in range(n)
+                    )
+                    outside = torch.sqrt(sum(
+                        (local[a] - clamped[a]) ** 2 for a in range(n)
+                    ))
+                    dist = torch.where(
+                        outside > 0.0,
+                        _band + outside,
+                        sdf_child(*clamped),
+                    )
                 union = dist if union is None else torch.minimum(union, dist)
             return union
 
-        composite = BodyAnalytical(
-            self.device, self.x, self.y, _composite_sdf,
-            (
-                lambda t: (0.0, 0.0, 0.0),
-                [
-                    lambda t, ip=initial_pose: -ip[0],
-                    lambda t, ip=initial_pose: -ip[1],
-                    lambda t, ip=initial_pose: -ip[2],
-                ],
-            ),
-            z=self.z, eps=eps, plotting=False, pre_update=False,
-            local_aabb=torch.stack([lo, hi]),
-            # No analytical fallback: the union of the children's own
-            # triangulations is not the union's surface.  If marching cubes
-            # finds nothing, the Lagrangian readout raises by itself.
-            triangulate=None,
-            surface_h=surface_h,
-            surface_aabb=surface_aabb,
+        update_maps = (
+            (lambda t: (0.0,) * D if D == 3 else 0.0),
+            [
+                (lambda t, ip=initial_pose, a=a: -ip[a])
+                for a in range(D)
+            ],
         )
-        # Geom offsets are baked into the sampled union, so the composite sits
-        # at the link origin.  This is also what makes it dimension-agnostic:
-        # the 2-D update path ignores ``local_pose`` entirely.
-        composite.local_pose = np.zeros(6, dtype=np.asarray(initial_pose).dtype)
-        composite.name = link_name
-        composite.collision_name = None
-        composite.mujoco_rgba = link_bodies[0].mujoco_rgba
-        composite.link_extras = link_bodies[0].link_extras
-        composite.bb = [[lo[a].cpu(), hi[a].cpu()] for a in range(3)]
-        return [composite]
+
+        def _make(contour=None, aabb=None):
+            body = BodyAnalytical(
+                self.device, self.x, self.y, _composite_sdf, update_maps,
+                z=self.z, eps=eps, plotting=False, pre_update=False,
+                local_aabb=torch.stack([lo, hi]) if aabb is None else aabb,
+                # No analytical fallback: the union of the children's own
+                # triangulations is not the union's surface.  If marching cubes
+                # finds nothing, the Lagrangian readout raises by itself.
+                triangulate=None,
+                surface_h=surface_h,
+                surface_aabb=surface_aabb,
+                contour=contour,
+            )
+            # Geom offsets are baked into the sampled union, so the composite
+            # sits at the link origin.  That is also what makes 2-D correct:
+            # the 2-D update path ignores ``local_pose`` entirely, so per-geom
+            # bodies used to collapse onto the link origin.
+            body.local_pose = np.zeros(
+                6, dtype=np.asarray(initial_pose).dtype)
+            body.name = link_name
+            body.collision_name = None
+            body.mujoco_rgba = link_bodies[0].mujoco_rgba
+            body.link_extras = link_bodies[0].link_extras
+            body.bb = [[lo[a].cpu(), hi[a].cpu()] for a in range(D)]
+            if D == 2:
+                # bb[2] is the out-of-plane thickness used by the 2-D
+                # ``force_scaling: auto`` path; keep the per-geom convention of
+                # carrying a third entry.
+                third = getattr(link_bodies[0], "bb", None)
+                body.bb.append(list(third[2]) if third is not None
+                               and len(third) > 2 else [0.0, 1.0])
+            return body
+
+        if D == 3:
+            return [_make()]
+
+        # 2-D: one body per connected loop of the union contour.  They share the
+        # union SDF, so the geometry each streams is identical; giving each a
+        # loop-tight AABB keeps them from redundantly stamping the whole link.
+        loops = self._union_contour_loops(_composite_sdf, lo, hi, surface_h)
+        if not loops:
+            return None
+        band = float(eps) + 4.0 * float(self.h)
+        bodies = []
+        for loop in loops:
+            loop_t = torch.tensor(loop, device=self.device, dtype=self.dtype)
+            loop_lo = loop_t.min(dim=1).values - band
+            loop_hi = loop_t.max(dim=1).values + band
+            bodies.append(_make(
+                contour=loop,
+                aabb=torch.stack([
+                    torch.maximum(loop_lo, lo), torch.minimum(loop_hi, hi),
+                ]),
+            ))
+        return bodies
+
+    def _union_contour_loops(self, sdf_fun, lo, hi, step):
+        """All closed loops of a 2-D union SDF, in link-local coordinates.
+
+        Sampled on a box tight to the union rather than the fluid grid, for the
+        same reason the 3-D surface is: a geom smaller than a fluid cell would
+        otherwise contribute no contour at all.
+        """
+        measure = _import_measure()
+        axes = []
+        for axis in range(2):
+            axis_lo = float(lo[axis])
+            axis_hi = float(hi[axis])
+            n_axis = max(4, int(math.ceil((axis_hi - axis_lo) / step)) + 1)
+            axes.append(axis_lo + (torch.arange(
+                n_axis, device=self.device, dtype=self.dtype) + 0.5) * step)
+        grid = torch.meshgrid(*axes, indexing="ij")
+        with torch.no_grad():
+            sdf_np = sdf_fun(*grid).cpu().numpy()
+        xnp = axes[0].cpu().numpy()
+        ynp = axes[1].cpu().numpy()
+        loops = []
+        for contour in measure.find_contours(sdf_np - float(self.h), 0):
+            pts = np.array(contour).T
+            pts[0] = xnp[0] + pts[0] * (xnp[1] - xnp[0])
+            pts[1] = ynp[0] + pts[1] * (ynp[1] - ynp[0])
+            if pts.shape[1] >= 4:
+                loops.append(pts)
+        return loops
 
     def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
                  nsamples=None, msamples=None, ksamples=None, plotting=False, plotting_meshes=False,
