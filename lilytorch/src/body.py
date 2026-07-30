@@ -807,6 +807,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             convexify          = body_pars["convexify"],
             scale              = body_pars["scale"],
             save_folder        = body_pars["save_folder"],
+            geometry_source    = body_pars.get("geometry_source", "collision"),
             **kwargs
         )
 
@@ -2541,9 +2542,12 @@ class CompositeBodyMesh(Body):
 
 class MultiAnimatBodies(Body):
 
+    #: Accepted values for the ``geometry_source`` constructor argument.
+    GEOMETRY_SOURCES = ("collision", "visual", "auto")
+
     def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
                  nsamples=None, msamples=None, ksamples=None, plotting=False, plotting_meshes=False,
-                 suit=0.0, **kwargs):
+                 suit=0.0, geometry_source="collision", **kwargs):
         """Union of bodies from one or more MuJoCo/SDF model files.
 
         Mesh-based bodies that share the same mesh file (and scale) are
@@ -2554,8 +2558,34 @@ class MultiAnimatBodies(Body):
         BDIMhandler streams the per-step geometry (the rigid ``body_update``
         kernel), so neither the staggered meshgrids nor the persistent
         staggered SDF / body-velocity fields are allocated here.
+
+        ``geometry_source`` selects which SDF geometry slot is immersed, and
+        must be stated per model because the two slots are not
+        interchangeable and no default is right for every animat:
+
+        ``"collision"`` (default)
+            Immerse ``<collision>`` geometry.  Required by models that encode
+            their wetted shape there -- the 1guilla swimmer's collision
+            meshes are its visual meshes widened in y to carry the swimsuit
+            volume, so immersing its visuals would silently strip the suit.
+        ``"visual"``
+            Immerse ``<visual>`` geometry.  Right when the collision set is
+            decimated for the contact solver: salamandra_robotica's tibiae
+            collide as a bare foot sphere with no shin, and its eyes carry no
+            collision geometry at all.
+        ``"auto"``
+            Visuals when the link has any, else collisions.  Convenient, but
+            it makes the wetted shape depend on how each link happens to be
+            authored, so prefer an explicit choice.
         """
         super().__init__(device, x, y, z=z, eps=eps)
+
+        if geometry_source not in self.GEOMETRY_SOURCES:
+            raise ValueError(
+                f"geometry_source={geometry_source!r} is not one of "
+                f"{self.GEOMETRY_SOURCES}."
+            )
+        self.geometry_source = geometry_source
 
         self.suit = suit
         self.plotting        = plotting
@@ -2632,11 +2662,16 @@ class MultiAnimatBodies(Body):
                         )
                         continue
 
-                collisions = link["collisions"]
-                if not collisions:
+                if self.geometry_source == "visual":
+                    geoms = link["visuals"]
+                elif self.geometry_source == "collision":
+                    geoms = link["collisions"]
+                else:  # "auto"
+                    geoms = link["visuals"] or link["collisions"]
+                if not geoms:
                     print(
-                        f"  Skipping link '{link_name}' of '{animat.sdf}': "
-                        "no collision geometry to immerse."
+                        f"  Skipping link '{link_name}' of '{animat.sdf}': no "
+                        f"{self.geometry_source} geometry to immerse."
                     )
                     continue
 
@@ -2645,7 +2680,7 @@ class MultiAnimatBodies(Body):
                 if morphology_link is not None:
                     link_extras = dict(getattr(morphology_link, "extras", {}) or {})
 
-                for collision in collisions:
+                for collision in geoms:
                     collision_pose = np.array(
                         collision["pose"] if "pose" in collision else np.zeros(6),
                         dtype=x.cpu().numpy().dtype,
@@ -2933,9 +2968,21 @@ class MultiAnimatBodies(Body):
                         ]
 
                     else:
-                        raise ValueError("Unsupported geometry type in SDF.")
+                        raise ValueError(
+                            f"Unsupported geometry type "
+                            f"{type(geometry).__name__!r} on "
+                            f"'{collision['name'] if 'name' in collision else '?'}' "
+                            f"of link '{link_name}' in '{animat.sdf}'. Supported: "
+                            "mesh (uri), box (size), sphere (radius), "
+                            "cylinder / capsule (radius + length)."
+                        )
 
-                    body.mujoco_rgba = _link_rgba
+                    # Per-geom colour when the geom carries one (visuals do,
+                    # collisions do not), else the link's first visual colour.
+                    _geom_rgba = getattr(collision, "color", None)
+                    body.mujoco_rgba = (
+                        list(_geom_rgba) if _geom_rgba is not None else _link_rgba
+                    )
                     body.local_pose = collision_pose
                     body.name = link_name
                     body.collision_name = collision["name"] if "name" in collision else None
