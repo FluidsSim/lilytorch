@@ -41,6 +41,22 @@ def _import_ndimage():
     from scipy import ndimage
     return ndimage
 
+def _import_rotation():
+    """Lazy import for scipy Rotation (euler -> matrix for geom local poses)."""
+    from scipy.spatial.transform import Rotation
+    return Rotation
+
+#: Sample-count ceiling for a composite body's union-surface marching cubes.
+_MAX_SURFACE_SAMPLES = 8.0e6
+#: Marching-cubes cells across the SMALLEST geom of a composite link.  Flat
+#: faces alias badly when under-resolved -- a cube's area is 9 % low at 8 cells
+#: across and exact by 16 -- so this is the accuracy knob for Lagrangian
+#: surfaces; raising it costs samples cubically, bounded by the ceiling above.
+_SURFACE_CELLS_PER_GEOM = 16.0
+#: Floor on the smallest child extent, so a degenerate geom cannot drive the
+#: surface spacing to zero.
+_EPS_TINY = 1.0e-9
+
 def _extract_surface_triangulation_3d(sdf_val_np, xnp, ynp, znp, device, dtype):
     """Run marching cubes on a 3-D SDF grid and return triangle data.
 
@@ -1064,9 +1080,16 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None, triangulate=None):
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None, triangulate=None, surface_h=None, surface_aabb=None):
         super().__init__(device, x, y, z=z, eps=eps)
         self.sdf = sdf
+        # Optional dedicated grid for the Lagrangian surface extraction.  When
+        # both are None the surface comes off the fluid grid, which cannot see a
+        # geom smaller than a cell; a composite body sets them so its surface
+        # resolves its SMALLEST child rather than the flow scale, on a box
+        # tight to the geometry rather than the BDIM-padded ``local_aabb``.
+        self._surface_h = surface_h
+        self._surface_aabb = surface_aabb
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
         self.plotting = plotting
@@ -1288,14 +1311,40 @@ class BodyAnalytical(Body):
         """
         tri_c = tri_n = tri_a = None
 
-        # ---- primary path: marching cubes on the fluid grid ----
+        # ---- primary path: marching cubes ----
         try:
-            xmid = (self.x.min() + self.x.max()) / 2
-            ymid = (self.y.min() + self.y.max()) / 2
-            zmid = (self.z.min() + self.z.max()) / 2
-            xcnt = self.x - xmid
-            ycnt = self.y - ymid
-            zcnt = self.z - zmid
+            surface_box = self._surface_aabb
+            if surface_box is None:
+                surface_box = self.local_aabb
+            if self._surface_h is not None and surface_box is not None:
+                # Body-local grid at an explicit spacing: resolves geometry the
+                # fluid grid is too coarse to see, and is far cheaper than
+                # sampling the whole domain because the box is body-sized.
+                box = surface_box.to(dtype=self.dtype)
+                step = float(self._surface_h)
+                axes = []
+                for axis in range(3):
+                    axis_lo = float(box[0, axis])
+                    axis_hi = float(box[1, axis])
+                    n_axis = max(
+                        4, int(math.ceil((axis_hi - axis_lo) / step)) + 1)
+                    # Half-cell stagger: a flat face lying exactly ON grid
+                    # nodes makes marching cubes emit degenerate triangles and
+                    # lose that face's area (a symmetric box came out 4 % small
+                    # without this).  Offsetting keeps every face mid-cell.
+                    axes.append(
+                        axis_lo + (torch.arange(
+                            n_axis, device=self.device, dtype=self.dtype,
+                        ) + 0.5) * step
+                    )
+                xcnt, ycnt, zcnt = axes
+            else:
+                xmid = (self.x.min() + self.x.max()) / 2
+                ymid = (self.y.min() + self.y.max()) / 2
+                zmid = (self.z.min() + self.z.max()) / 2
+                xcnt = self.x - xmid
+                ycnt = self.y - ymid
+                zcnt = self.z - zmid
             Xg, Yg, Zg = torch.meshgrid(xcnt, ycnt, zcnt, indexing="ij")
             sdf_cnt = self.sdf(Xg, Yg, Zg)
             sdf_np = sdf_cnt.cpu().numpy()
@@ -2545,6 +2594,172 @@ class MultiAnimatBodies(Body):
     #: Accepted values for the ``geometry_source`` constructor argument.
     GEOMETRY_SOURCES = ("collision", "visual", "auto")
 
+    def _link_composite_body(self, link_bodies, link_name, sdf_path,
+                             initial_pose, eps):
+        """Collapse a link's per-geom bodies into ONE composite body (3-D).
+
+        Every geom of a link is rigidly attached to it, so their union is rigid
+        in the link frame: it can be sampled once into a body-local SDF table
+        (``BDIMhandler._init_interp``) and thereafter only rigidly transformed,
+        exactly like a single geom.  The ``min`` below is therefore evaluated at
+        init, never per step.
+
+        Collapsing is about correctness, not just cost.  ``BodyAnalytical``
+        marching-cubes its SDF to get the Lagrangian surface, so a composite
+        yields the true **union** triangulation -- disconnected pieces included,
+        which is why two separate eye spheres work.  Keeping one body per geom
+        instead would hand the Lagrangian readout each geom's *own* full
+        surface, including the facets buried inside a sibling, and those sample
+        pressure from the body interior.  (The Eulerian readout is immune: it
+        integrates the union SDF and partitions the result.)
+
+        Returns ``None`` when the link cannot be collapsed, so the caller keeps
+        the per-geom bodies.
+        """
+        if len(link_bodies) <= 1 or self.ndim != 3:
+            # 2-D bodies are contour-based and the Lagrangian kernel treats one
+            # body as one closed CCW loop, so a link whose union is
+            # disconnected cannot be a single 2-D body.
+            return None
+
+        # A tabulated (mesh) child clamps its interpolator outside its own box,
+        # and a clamped-small value would win the ``min`` and eat its siblings.
+        # Masking each child to +inf outside its own AABB would fix it; until
+        # then say so rather than silently corrupting the union.
+        tabulated = sorted({b.collision_name or "?" for b in link_bodies
+                            if hasattr(b, "mesh_file")})
+        if tabulated:
+            raise ValueError(
+                f"Link '{link_name}' of '{sdf_path}' has {len(link_bodies)} "
+                f"geoms including mesh geometry ({', '.join(tabulated)}). "
+                "Unioning a mesh with sibling geoms is not supported yet: give "
+                "the link a single mesh geom, or make its geoms all primitives."
+            )
+
+        Rotation = _import_rotation()
+        rots, transls = [], []
+        for body in link_bodies:
+            local_pose = np.asarray(body.local_pose, dtype=float)
+            rots.append(torch.tensor(
+                Rotation.from_euler("xyz", local_pose[3:]).as_matrix(),
+                device=self.device, dtype=self.dtype,
+            ))
+            transls.append(torch.tensor(
+                local_pose[:3], device=self.device, dtype=self.dtype,
+            ))
+
+        # Union AABB: every child's own (already band-padded) box, its eight
+        # corners carried into the link frame.  Bail out if any child cannot
+        # bound itself, since an unbounded composite would have to be evaluated
+        # over the whole grid.
+        corner_ids = [(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)]
+
+        def _to_link_frame(box, rot, transl):
+            """Link-frame (lo, hi) of a child-frame ``(2, 3)``-style box."""
+            pts = torch.stack([
+                torch.stack([box[corner[a]][a] for a in range(3)])
+                for corner in corner_ids
+            ]) @ rot.T + transl
+            return pts.min(dim=0).values, pts.max(dim=0).values
+
+        # Two boxes are needed and they are NOT interchangeable.  ``local_aabb``
+        # is padded by the BDIM band (eps + 4h) because the stencil reaches that
+        # far past the surface, which makes it useless for judging how big the
+        # geometry actually is: for a sub-cell geom the padding is the box.  The
+        # children's ``bb`` carries the raw half-extents, so the surface grid is
+        # sized and bounded from that instead.
+        pad_lo_all, pad_hi_all, raw_lo_all, raw_hi_all = [], [], [], []
+        for body, rot, transl in zip(link_bodies, rots, transls):
+            local_aabb = getattr(body, "local_aabb", None)
+            raw_bb = getattr(body, "bb", None)
+            if local_aabb is None or raw_bb is None or len(raw_bb) < 3:
+                return None
+            box = local_aabb.to(device=self.device, dtype=self.dtype)
+            pad_lo, pad_hi = _to_link_frame(
+                [[box[0, a] for a in range(3)], [box[1, a] for a in range(3)]],
+                rot, transl,
+            )
+            raw = [[float(raw_bb[a][side]) for a in range(3)] for side in (0, 1)]
+            raw_box = [[torch.tensor(v, device=self.device, dtype=self.dtype)
+                        for v in side] for side in raw]
+            raw_lo, raw_hi = _to_link_frame(raw_box, rot, transl)
+            pad_lo_all.append(pad_lo); pad_hi_all.append(pad_hi)
+            raw_lo_all.append(raw_lo); raw_hi_all.append(raw_hi)
+        lo = torch.stack(pad_lo_all).min(dim=0).values
+        hi = torch.stack(pad_hi_all).max(dim=0).values
+
+        # Marching-cubes spacing: the fluid grid cannot see a geom smaller than
+        # a cell (salamandra's eye spheres are sub-cell and yielded no surface
+        # at all), so resolve the SMALLEST child, never coarser than the flow
+        # scale, then cap total samples so a link mixing very different scales
+        # cannot blow up init.
+        child_extent = min(
+            float((child_hi - child_lo).min())
+            for child_lo, child_hi in zip(raw_lo_all, raw_hi_all)
+        )
+        surface_h = min(
+            float(self.h),
+            max(child_extent, _EPS_TINY) / _SURFACE_CELLS_PER_GEOM,
+        )
+        surface_lo = torch.stack(raw_lo_all).min(dim=0).values
+        surface_hi = torch.stack(raw_hi_all).max(dim=0).values
+        n_samples = float(torch.prod(
+            (surface_hi - surface_lo).clamp(min=0.0) / surface_h + 5.0))
+        if n_samples > _MAX_SURFACE_SAMPLES:
+            surface_h *= (n_samples / _MAX_SURFACE_SAMPLES) ** (1.0 / 3.0)
+        # Keep the zero level set strictly interior to the surface box.
+        margin = 3.0 * surface_h
+        surface_aabb = torch.stack([surface_lo - margin, surface_hi + margin])
+
+        children = tuple(
+            (body.sdf, rot, transl)
+            for body, rot, transl in zip(link_bodies, rots, transls)
+        )
+
+        def _composite_sdf(*q, _children=children):
+            """min over geoms, each evaluated in its own local frame."""
+            union = None
+            for sdf_child, rot, transl in _children:
+                dx, dy, dz = (q[a] - transl[a] for a in range(3))
+                # rot.T @ (q - transl), i.e. contract along rot's columns.
+                dist = sdf_child(
+                    rot[0, 0] * dx + rot[1, 0] * dy + rot[2, 0] * dz,
+                    rot[0, 1] * dx + rot[1, 1] * dy + rot[2, 1] * dz,
+                    rot[0, 2] * dx + rot[1, 2] * dy + rot[2, 2] * dz,
+                )
+                union = dist if union is None else torch.minimum(union, dist)
+            return union
+
+        composite = BodyAnalytical(
+            self.device, self.x, self.y, _composite_sdf,
+            (
+                lambda t: (0.0, 0.0, 0.0),
+                [
+                    lambda t, ip=initial_pose: -ip[0],
+                    lambda t, ip=initial_pose: -ip[1],
+                    lambda t, ip=initial_pose: -ip[2],
+                ],
+            ),
+            z=self.z, eps=eps, plotting=False, pre_update=False,
+            local_aabb=torch.stack([lo, hi]),
+            # No analytical fallback: the union of the children's own
+            # triangulations is not the union's surface.  If marching cubes
+            # finds nothing, the Lagrangian readout raises by itself.
+            triangulate=None,
+            surface_h=surface_h,
+            surface_aabb=surface_aabb,
+        )
+        # Geom offsets are baked into the sampled union, so the composite sits
+        # at the link origin.  This is also what makes it dimension-agnostic:
+        # the 2-D update path ignores ``local_pose`` entirely.
+        composite.local_pose = np.zeros(6, dtype=np.asarray(initial_pose).dtype)
+        composite.name = link_name
+        composite.collision_name = None
+        composite.mujoco_rgba = link_bodies[0].mujoco_rgba
+        composite.link_extras = link_bodies[0].link_extras
+        composite.bb = [[lo[a].cpu(), hi[a].cpu()] for a in range(3)]
+        return [composite]
+
     def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
                  nsamples=None, msamples=None, ksamples=None, plotting=False, plotting_meshes=False,
                  suit=0.0, geometry_source="collision", **kwargs):
@@ -2680,6 +2895,7 @@ class MultiAnimatBodies(Body):
                 if morphology_link is not None:
                     link_extras = dict(getattr(morphology_link, "extras", {}) or {})
 
+                link_bodies = []
                 for collision in geoms:
                     collision_pose = np.array(
                         collision["pose"] if "pose" in collision else np.zeros(6),
@@ -2987,6 +3203,14 @@ class MultiAnimatBodies(Body):
                     body.name = link_name
                     body.collision_name = collision["name"] if "name" in collision else None
                     body.link_extras = link_extras
+                    link_bodies.append(body)
+
+                # One fluid body per link where the geometry allows it; the
+                # coupling boundary sums per link either way, so a link that
+                # cannot be collapsed still behaves correctly.
+                for body in (self._link_composite_body(
+                        link_bodies, link_name, animat.sdf, initial_pose, eps)
+                        or link_bodies):
                     self.bodies.append(body)
                     self.body_ids.append([animat_i, link_id])
 
