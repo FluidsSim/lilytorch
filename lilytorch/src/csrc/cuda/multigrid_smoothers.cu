@@ -242,8 +242,6 @@ __global__ void rbgs_2d_tiled_kernel(
                       + cp1_s[ti][tj] + cm1_s[ti][tj]);
     const scalar_t Jinv = ((J >= jcap_tol) || (J <= -jcap_tol))
                           ? ((scalar_t)1 / J) : (scalar_t)0;
-    const scalar_t neg_f = -f_s[ti][tj];
-
     // Color: 0 = updates on the first half-sweep, 1 = on the second.
     //
     // ``reverse`` swaps the two, turning red-then-black into black-then-red.
@@ -262,23 +260,25 @@ __global__ void rbgs_2d_tiled_kernel(
 
         // --- first half-sweep (red, or black when reversed) ---
         if (color == 0) {
-            const scalar_t sum =
-                  cp0_s[ti][tj] * p_s[ti + 2][tj + 1]   // i+1 neighbor
-                + cm0_s[ti][tj] * p_s[ti    ][tj + 1]   // i-1 neighbor
-                + cp1_s[ti][tj] * p_s[ti + 1][tj + 2]   // j+1 neighbor
-                + cm1_s[ti][tj] * p_s[ti + 1][tj    ];  // j-1 neighbor
-            p_s[ti + 1][tj + 1] = (neg_f + sum) * Jinv;
+            const scalar_t pc = p_s[ti + 1][tj + 1];
+            const scalar_t flux =
+                  cp0_s[ti][tj] * (p_s[ti + 2][tj + 1] - pc)
+                + cm0_s[ti][tj] * (p_s[ti    ][tj + 1] - pc)
+                + cp1_s[ti][tj] * (p_s[ti + 1][tj + 2] - pc)
+                + cm1_s[ti][tj] * (p_s[ti + 1][tj    ] - pc);
+            p_s[ti + 1][tj + 1] = pc + (flux - f_s[ti][tj]) * Jinv;
         }
         __syncthreads();
 
         // --- second half-sweep (black, or red when reversed) ---
         if (color == 1) {
-            const scalar_t sum =
-                  cp0_s[ti][tj] * p_s[ti + 2][tj + 1]
-                + cm0_s[ti][tj] * p_s[ti    ][tj + 1]
-                + cp1_s[ti][tj] * p_s[ti + 1][tj + 2]
-                + cm1_s[ti][tj] * p_s[ti + 1][tj    ];
-            p_s[ti + 1][tj + 1] = (neg_f + sum) * Jinv;
+            const scalar_t pc = p_s[ti + 1][tj + 1];
+            const scalar_t flux =
+                  cp0_s[ti][tj] * (p_s[ti + 2][tj + 1] - pc)
+                + cm0_s[ti][tj] * (p_s[ti    ][tj + 1] - pc)
+                + cp1_s[ti][tj] * (p_s[ti + 1][tj + 2] - pc)
+                + cm1_s[ti][tj] * (p_s[ti + 1][tj    ] - pc);
+            p_s[ti + 1][tj + 1] = pc + (flux - f_s[ti][tj]) * Jinv;
         }
         __syncthreads();
     }
@@ -413,15 +413,16 @@ __global__ void rbgs_3d_halfsweep_kernel(
     if (J < jcap_tol && J > -jcap_tol) return;
     const scalar_t Jinv = (scalar_t)1 / J;
 
-    const scalar_t sum =
-          cp0[idx_c] * p[p_base + si]    // p[i+1, j, k]
-        + cm0[idx_c] * p[p_base - si]    // p[i-1, j, k]
-        + cp1[idx_c] * p[p_base + sj]    // p[i, j+1, k]
-        + cm1[idx_c] * p[p_base - sj]    // p[i, j-1, k]
-        + cp2[idx_c] * p[p_base + 1]     // p[i, j, k+1]
-        + cm2[idx_c] * p[p_base - 1];    // p[i, j, k-1]
+    const scalar_t pc = p[p_base];
+    const scalar_t flux =
+          cp0[idx_c] * (p[p_base + si] - pc)
+        + cm0[idx_c] * (p[p_base - si] - pc)
+        + cp1[idx_c] * (p[p_base + sj] - pc)
+        + cm1[idx_c] * (p[p_base - sj] - pc)
+        + cp2[idx_c] * (p[p_base + 1] - pc)
+        + cm2[idx_c] * (p[p_base - 1] - pc);
 
-    p[p_base] = (-f[idx_c] + sum) * Jinv;
+    p[p_base] = pc + (flux - f[idx_c]) * Jinv;
 }
 
 // ── C++ wrapper ───────────────────────────────────────────────────────
@@ -582,21 +583,19 @@ __global__ void jacobi_2d_tiled_kernel(
                       + cp1_s[ti][tj] + cm1_s[ti][tj]);
     const scalar_t Jinv = ((J >= jcap_tol) || (J <= -jcap_tol))
                           ? ((scalar_t)1 / J) : (scalar_t)0;
-    const scalar_t neg_f = -f_s[ti][tj];
-
     for (int s = 0; s < nsmoothing; s++) {
         // Read phase: neighbours already in p_s (all threads updated last iter)
-        const scalar_t sum =
-              cp0_s[ti][tj] * p_s[ti + 2][tj + 1]
-            + cm0_s[ti][tj] * p_s[ti    ][tj + 1]
-            + cp1_s[ti][tj] * p_s[ti + 1][tj + 2]
-            + cm1_s[ti][tj] * p_s[ti + 1][tj    ];
         const scalar_t p_old = p_s[ti + 1][tj + 1];
-        const scalar_t p_new = (neg_f + sum) * Jinv;
+        const scalar_t flux =
+              cp0_s[ti][tj] * (p_s[ti + 2][tj + 1] - p_old)
+            + cm0_s[ti][tj] * (p_s[ti    ][tj + 1] - p_old)
+            + cp1_s[ti][tj] * (p_s[ti + 1][tj + 2] - p_old)
+            + cm1_s[ti][tj] * (p_s[ti + 1][tj    ] - p_old);
         __syncthreads();  // ensure all reads are done before any write
 
         // Write phase
-        p_s[ti + 1][tj + 1] = w * p_new + ((scalar_t)1 - w) * p_old;
+        p_s[ti + 1][tj + 1] =
+            p_old + w * (flux - f_s[ti][tj]) * Jinv;
         __syncthreads();  // ensure all writes done before next read
     }
 
@@ -710,16 +709,16 @@ __global__ void jacobi_3d_kernel(
     }
     const scalar_t Jinv = (scalar_t)1 / J;
 
-    const scalar_t sum =
-          cp0[idx_c] * p_in[p_base + si]
-        + cm0[idx_c] * p_in[p_base - si]
-        + cp1[idx_c] * p_in[p_base + sj]
-        + cm1[idx_c] * p_in[p_base - sj]
-        + cp2[idx_c] * p_in[p_base + 1]
-        + cm2[idx_c] * p_in[p_base - 1];
+    const scalar_t pc = p_in[p_base];
+    const scalar_t flux =
+          cp0[idx_c] * (p_in[p_base + si] - pc)
+        + cm0[idx_c] * (p_in[p_base - si] - pc)
+        + cp1[idx_c] * (p_in[p_base + sj] - pc)
+        + cm1[idx_c] * (p_in[p_base - sj] - pc)
+        + cp2[idx_c] * (p_in[p_base + 1] - pc)
+        + cm2[idx_c] * (p_in[p_base - 1] - pc);
 
-    const scalar_t p_new = (-f[idx_c] + sum) * Jinv;
-    p_out[p_base] = w * p_new + ((scalar_t)1 - w) * p_in[p_base];
+    p_out[p_base] = pc + w * (flux - f[idx_c]) * Jinv;
 }
 
 // ── C++ wrapper ───────────────────────────────────────────────────────
@@ -799,7 +798,10 @@ void jacobi_sweep_3d_cuda(
 
 // =====================================================================
 // Multigrid residual kernels — compute r = (f - A(p)) * (|J| >= jcap_tol)
-// where A(p) = sum(c * p_neighbors) - J * p   and J = sum_d (c_{d+}+c_{d-}).
+// in flux-difference form,
+//   A(p) = sum_faces c_face * (p_neighbor - p_cell).
+// This is algebraically identical to sum(c*p_neighbor) - J*p, but remains
+// gauge-invariant in floating point instead of cancelling O(c*p) terms.
 //
 // J and the active mask live ONLY in thread registers; no global tensors.
 // This replaces the PyTorch ``_J*d`` + ``torch.abs(...) >= jcap_tol`` +
@@ -841,13 +843,13 @@ __global__ void mg_residual_2d_kernel(
         return;
     }
 
-    const scalar_t sum = a_cp0 * p[p_base + sp]      // p[i+1, j]
-                       + a_cm0 * p[p_base - sp]      // p[i-1, j]
-                       + a_cp1 * p[p_base + 1]       // p[i, j+1]
-                       + a_cm1 * p[p_base - 1];      // p[i, j-1]
     const scalar_t pc  = p[p_base];
+    const scalar_t flux = a_cp0 * (p[p_base + sp] - pc)
+                        + a_cm0 * (p[p_base - sp] - pc)
+                        + a_cp1 * (p[p_base + 1] - pc)
+                        + a_cm1 * (p[p_base - 1] - pc);
 
-    r[idx_c] = f[idx_c] - sum + J * pc;
+    r[idx_c] = f[idx_c] - flux;
 }
 
 void mg_residual_2d_cuda(
@@ -929,15 +931,15 @@ __global__ void mg_residual_3d_kernel(
         return;
     }
 
-    const scalar_t sum = a_cp0 * p[p_base + si]    // p[i+1, j, k]
-                       + a_cm0 * p[p_base - si]    // p[i-1, j, k]
-                       + a_cp1 * p[p_base + sj]    // p[i, j+1, k]
-                       + a_cm1 * p[p_base - sj]    // p[i, j-1, k]
-                       + a_cp2 * p[p_base + 1]     // p[i, j, k+1]
-                       + a_cm2 * p[p_base - 1];    // p[i, j, k-1]
     const scalar_t pc  = p[p_base];
+    const scalar_t flux = a_cp0 * (p[p_base + si] - pc)
+                        + a_cm0 * (p[p_base - si] - pc)
+                        + a_cp1 * (p[p_base + sj] - pc)
+                        + a_cm1 * (p[p_base - sj] - pc)
+                        + a_cp2 * (p[p_base + 1] - pc)
+                        + a_cm2 * (p[p_base - 1] - pc);
 
-    r[idx_c] = f[idx_c] - sum + J * pc;
+    r[idx_c] = f[idx_c] - flux;
 }
 
 void mg_residual_3d_cuda(

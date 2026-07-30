@@ -178,8 +178,12 @@ static void vcycle_2d(
     mg_residual_2d_cuda(p, f, cp0, cm0, cp1, cm1, jcap_tol, r_out);
 
     if (Nx > 2 && Ny > 2) {
-        const int Nx_c = Nx / 2;
-        const int Ny_c = Ny / 2;
+        // Pad an odd high side by one virtual Neumann cell before factor-two
+        // coarsening.  Restriction gives that virtual cell zero residual,
+        // extends its face coefficient from the boundary, and prolongation
+        // crops it on the way back up.
+        const int Nx_c = (Nx + 1) / 2;
+        const int Ny_c = (Ny + 1) / 2;
 
         using namespace poisson_scratch;
 
@@ -255,9 +259,9 @@ static void vcycle_3d(
                         jcap_tol, r_out);
 
     if (Nx > 2 && Ny > 2 && Nz > 2) {
-        const int Nx_c = Nx / 2;
-        const int Ny_c = Ny / 2;
-        const int Nz_c = Nz / 2;
+        const int Nx_c = (Nx + 1) / 2;
+        const int Ny_c = (Ny + 1) / 2;
+        const int Nz_c = (Nz + 1) / 2;
 
         using namespace poisson_scratch;
 

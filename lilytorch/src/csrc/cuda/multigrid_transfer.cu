@@ -4,8 +4,8 @@
 //  Provides:
 //    - restrict_residual_{2,3}d : fine -> coarse residual restriction
 //        r_c[I,J] = sum over 4 (or 8) children   (sum-only, no scaling)
-//      Bit-exact with the existing slicing chain
-//      ``_restrict_residual_{2,3}d`` in poisson_mult.py.
+//      Odd high-side cells are retained as singleton children.  Equivalently,
+//      the fine grid is extended to an even size with zero residual.
 //
 //    - restrict_face_{2,3}d : fine -> coarse face coefficient restriction
 //        WaterLily convention: stride-2 in the face direction, SUM in the
@@ -18,10 +18,11 @@
 //    - prolongate_add_{2,3}d : coarse error -> fine correction, ADDED
 //      in-place to p[interior]. Implements exact
 //      F.interpolate(mode='bilinear/trilinear', align_corners=False)
-//      with cell-centred mapping
-//          src = (dst + 0.5) * Nc/Nf - 0.5
-//      and clamped-edge weights. The fused add saves one fine-grid
-//      tensor allocation per V-cycle level.
+//      with factor-two cell-centred mapping
+//          src = (dst + 0.5) / 2 - 0.5
+//      on the even virtual fine grid of size 2*Nc.  For an odd physical fine
+//      size the last virtual cell is simply cropped.  The fused add saves one
+//      fine-grid tensor allocation per V-cycle level.
 //
 //  Memory layout (C-contiguous, row-major):
 //    Interior tensors (r, ch, cv, cw): shape (Nx, Ny[, Nz])
@@ -57,8 +58,6 @@ __global__ void restrict_residual_2d_kernel(
     const int I = blockIdx.y * blockDim.y + threadIdx.y;
     if (I >= Nx_c || J >= Ny_c) return;
 
-    // Bit-exact with: e0,o0 = r[::2], r[1::2]; rc = e0[:m0] + o0[:m0]; then dim 1.
-    // m0 = min(ceil(Nx_f/2), floor(Nx_f/2)) = Nx_c (we use floor(Nx_f/2) here).
     const int i0 = 2 * I;
     const int i1 = i0 + 1;
     const int j0 = 2 * J;
@@ -154,9 +153,12 @@ void restrict_residual_3d_cuda(at::Tensor r, at::Tensor rc) {
 //   3-D: dim 2 face  -> (NT0, NT1, NF2)
 // where NFd is "face count along d" and NTd is "transverse cell count along d".
 //
-// Coarse-face shape per axis:
-//   face axis d: NFc_d = ceil(NFf_d / 2)  (stride-2 keeps every other face)
-//   transverse:  NTc_t = NTf_t / 2        (after sum-of-pairs; uses min())
+// Coarse cell counts are ceil(Nf/2).  Conceptually, an odd fine grid is padded
+// by one high-side Neumann cell before factor-two coarsening:
+//   * the missing residual is zero (handled by restrict_residual above);
+//   * face coefficients are extended by their high-side boundary value.
+// This keeps every physical cell in the hierarchy while leaving even grids
+// bit-for-bit on the original transfer geometry.
 //
 // Concrete coarse-cell formula (FACE_DIM=0, 2-D):
 //   ch_c[I, J] = 0.5 * (ch[2I, 2J] + ch[2I, 2J+1])
@@ -176,25 +178,22 @@ __global__ void restrict_face_2d_kernel(
     if (I >= Nc0 || J >= Nc1) return;
 
     // FACE_DIM = face direction (the dim that uses stride-2, NOT sum).
-    int i_src, j_src_lo, j_src_hi;
-    int i_src_other;
     scalar_t s;
     if (FACE_DIM == 0) {
         // face axis is dim 0 (rows). dim 0: stride-2. dim 1: sum pairs.
-        i_src = 2 * I;
-        j_src_lo = 2 * J;
-        j_src_hi = 2 * J + 1;
+        const int i_src = min(2 * I, Nf0 - 1);
+        const int j_src_lo = min(2 * J, Nf1 - 1);
+        const int j_src_hi = min(2 * J + 1, Nf1 - 1);
         const scalar_t a = src[i_src * Nf1 + j_src_lo];
-        const scalar_t b = (j_src_hi < Nf1) ? src[i_src * Nf1 + j_src_hi] : (scalar_t)0;
+        const scalar_t b = src[i_src * Nf1 + j_src_hi];
         s = a + b;
-        (void)i_src_other;
     } else {
         // FACE_DIM == 1. dim 0: sum pairs. dim 1: stride-2.
-        const int i_lo = 2 * I;
-        const int i_hi = 2 * I + 1;
-        const int j = 2 * J;
+        const int i_lo = min(2 * I, Nf0 - 1);
+        const int i_hi = min(2 * I + 1, Nf0 - 1);
+        const int j = min(2 * J, Nf1 - 1);
         const scalar_t a = src[i_lo * Nf1 + j];
-        const scalar_t b = (i_hi < Nf0) ? src[i_hi * Nf1 + j] : (scalar_t)0;
+        const scalar_t b = src[i_hi * Nf1 + j];
         s = a + b;
     }
 
@@ -229,14 +228,11 @@ __global__ void restrict_face_3d_kernel(
 
     scalar_t s = 0;
     for (int di = 0; di < ni; ++di) {
-        const int ii = i_lo + di;
-        if (ii >= Nf0) continue;
+        const int ii = min(i_lo + di, Nf0 - 1);
         for (int dj = 0; dj < nj; ++dj) {
-            const int jj = j_lo + dj;
-            if (jj >= Nf1) continue;
+            const int jj = min(j_lo + dj, Nf1 - 1);
             for (int dk = 0; dk < nk; ++dk) {
-                const int kk = k_lo + dk;
-                if (kk >= Nf2) continue;
+                const int kk = min(k_lo + dk, Nf2 - 1);
                 s += src[ii*si_f + jj*sj_f + kk];
             }
         }
@@ -302,20 +298,22 @@ void restrict_face_3d_cuda(at::Tensor src, at::Tensor dst, int64_t face_dim) {
 // =====================================================================
 // Prolongation + correction (fused add into ghost-padded p)
 //
-//   F.interpolate(align_corners=False, bilinear/trilinear) on
-//   err_c[1:-1, 1:-1[, 1:-1]] to shape (Nx_f, Ny_f[, Nz_f]), then
+//   Factor-two bilinear/trilinear interpolation on
+//   err_c[1:-1, 1:-1[, 1:-1]], cropped to the physical fine shape, then
 //   p[1+i, 1+j[, 1+k]] += interp.
 //
 // Cell-centred mapping for each dim:
-//   src = (dst + 0.5) * Nc/Nf - 0.5
+//   src = (dst + 0.5) * Nc/(2*Nc) - 0.5
 //   src_l = clamp(floor(src), 0, Nc-1)
 //   src_r = clamp(src_l + 1, 0, Nc-1)
 //   w_r   = clamp(src - floor(src), 0, 1)   (== src - src_l if src in [0,Nc-1])
 //   w_l   = 1 - w_r
 //
-// Here Nc = interior coarse size (= err_coarse.shape[d] - 2), Nf = fine
-// interior size. Source tensor is the ghost-padded err_coarse (so we read
-// at [1 + src_l/r, ...]).
+// Here Nc = ceil(Nf_physical/2), so 2*Nc is the virtual even fine size.
+// Source tensor is the ghost-padded err_coarse (so we read at
+// [1 + src_l/r, ...]).  Using 2*Nc rather than Nf_physical is essential:
+// an odd physical grid is a crop of factor-two interpolation, not a stretched
+// interpolation over a shorter domain.
 // =====================================================================
 
 // Computed in scalar_t -- the tensor dtype the user selected -- like every other
@@ -323,7 +321,7 @@ void restrict_face_3d_cuda(at::Tensor src, at::Tensor dst, int64_t face_dim) {
 // align_corners=False interpolation (which uses opmath_t = double for f32 src).
 // That made a 4-tap bilinear interp cost more than an rbgs sweep on consumer
 // GPUs, where FP64 runs at 1/64 of FP32 (measured: 200 us vs 11 us at 1024^2).
-// It is also safe to drop: for multigrid coarsening Nc/Nf == 1/2 exactly, so
+// It is also safe to drop: multigrid always passes Nf=2*Nc here, so
 // `src` and the weights are exact binary fractions (0.25 / 0.75) in fp32 too --
 // only the 4-tap accumulation rounds differently, at ~1 ulp on a V-cycle
 // *correction*.
@@ -363,8 +361,8 @@ __global__ void prolongate_add_2d_kernel(
 
     int il, ir, jl, jr;
     scalar_t wil, wir, wjl, wjr;
-    linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
-    linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+    linear_weights<scalar_t>(i, Nx_c, 2 * Nx_c, il, ir, wil, wir);
+    linear_weights<scalar_t>(j, Ny_c, 2 * Ny_c, jl, jr, wjl, wjr);
 
     // Read ec at [1+il, 1+jl], [1+il, 1+jr], [1+ir, 1+jl], [1+ir, 1+jr]
     const int se = Ny_c + 2;   // ghost-padded coarse row stride
@@ -396,9 +394,9 @@ __global__ void prolongate_add_3d_kernel(
 
     int il, ir, jl, jr, kl, kr;
     scalar_t wil, wir, wjl, wjr, wkl, wkr;
-    linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
-    linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
-    linear_weights<scalar_t>(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
+    linear_weights<scalar_t>(i, Nx_c, 2 * Nx_c, il, ir, wil, wir);
+    linear_weights<scalar_t>(j, Ny_c, 2 * Ny_c, jl, jr, wjl, wjr);
+    linear_weights<scalar_t>(k, Nz_c, 2 * Nz_c, kl, kr, wkl, wkr);
 
     const int sje = Nz_c + 2;
     const int sie = (Ny_c + 2) * (Nz_c + 2);
@@ -498,8 +496,8 @@ __global__ void restrict_fw_2d_kernel(
 
     int il, ir, jl, jr;
     scalar_t wil, wir, wjl, wjr;
-    linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
-    linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+    linear_weights<scalar_t>(i, Nx_c, 2 * Nx_c, il, ir, wil, wir);
+    linear_weights<scalar_t>(j, Ny_c, 2 * Ny_c, jl, jr, wjl, wjr);
 
     const scalar_t val = r[i * Ny_f + j];
     const int ii[2] = {il, ir};  const scalar_t wi[2] = {wil, wir};
@@ -525,9 +523,9 @@ __global__ void restrict_fw_3d_kernel(
 
     int il, ir, jl, jr, kl, kr;
     scalar_t wil, wir, wjl, wjr, wkl, wkr;
-    linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
-    linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
-    linear_weights<scalar_t>(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
+    linear_weights<scalar_t>(i, Nx_c, 2 * Nx_c, il, ir, wil, wir);
+    linear_weights<scalar_t>(j, Ny_c, 2 * Ny_c, jl, jr, wjl, wjr);
+    linear_weights<scalar_t>(k, Nz_c, 2 * Nz_c, kl, kr, wkl, wkr);
 
     const int sj_c = Nz_c;
     const int si_c = Ny_c * Nz_c;

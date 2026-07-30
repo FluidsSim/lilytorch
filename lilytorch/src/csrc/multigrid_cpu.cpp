@@ -136,12 +136,13 @@ static void rbgs_sweep_2d_cpu_impl(
                     const scalar_t J = cp0_row[j] + cm0_row[j] + cp1_row[j] + cm1_row[j];
                     if (J < jcap_tol && J > -jcap_tol) continue;
                     const int pj = j + 1;
-                    const scalar_t sum =
-                        cp0_row[j] * p_row[pj + stride_p]   // i+1
-                      + cm0_row[j] * p_row[pj - stride_p]   // i-1
-                      + cp1_row[j] * p_row[pj + 1]          // j+1
-                      + cm1_row[j] * p_row[pj - 1];         // j-1
-                    p_row[pj] = (-f_row[j] + sum) / J;
+                    const scalar_t pc = p_row[pj];
+                    const scalar_t flux =
+                        cp0_row[j] * (p_row[pj + stride_p] - pc)
+                      + cm0_row[j] * (p_row[pj - stride_p] - pc)
+                      + cp1_row[j] * (p_row[pj + 1] - pc)
+                      + cm1_row[j] * (p_row[pj - 1] - pc);
+                    p_row[pj] = pc + (flux - f_row[j]) / J;
                 }
             }
         });
@@ -161,12 +162,13 @@ static void rbgs_sweep_2d_cpu_impl(
                     const scalar_t J = cp0_row[j] + cm0_row[j] + cp1_row[j] + cm1_row[j];
                     if (J < jcap_tol && J > -jcap_tol) continue;
                     const int pj = j + 1;
-                    const scalar_t sum =
-                        cp0_row[j] * p_row[pj + stride_p]
-                      + cm0_row[j] * p_row[pj - stride_p]
-                      + cp1_row[j] * p_row[pj + 1]
-                      + cm1_row[j] * p_row[pj - 1];
-                    p_row[pj] = (-f_row[j] + sum) / J;
+                    const scalar_t pc = p_row[pj];
+                    const scalar_t flux =
+                        cp0_row[j] * (p_row[pj + stride_p] - pc)
+                      + cm0_row[j] * (p_row[pj - stride_p] - pc)
+                      + cp1_row[j] * (p_row[pj + 1] - pc)
+                      + cm1_row[j] * (p_row[pj - 1] - pc);
+                    p_row[pj] = pc + (flux - f_row[j]) / J;
                 }
             }
         });
@@ -212,14 +214,15 @@ static void rbgs_sweep_3d_cpu_impl(
                                          + cp1[cbase+k] + cm1[cbase+k]
                                          + cp2[cbase+k] + cm2[cbase+k];
                         if (J < jcap_tol && J > -jcap_tol) continue;
-                        const scalar_t sum =
-                              cp0[cbase+k] * p[pbase + k + si]
-                            + cm0[cbase+k] * p[pbase + k - si]
-                            + cp1[cbase+k] * p[pbase + k + sj]
-                            + cm1[cbase+k] * p[pbase + k - sj]
-                            + cp2[cbase+k] * p[pbase + k + 1]
-                            + cm2[cbase+k] * p[pbase + k - 1];
-                        p[pbase + k] = (-f[cbase+k] + sum) / J;
+                        const scalar_t pc = p[pbase + k];
+                        const scalar_t flux =
+                              cp0[cbase+k] * (p[pbase + k + si] - pc)
+                            + cm0[cbase+k] * (p[pbase + k - si] - pc)
+                            + cp1[cbase+k] * (p[pbase + k + sj] - pc)
+                            + cm1[cbase+k] * (p[pbase + k - sj] - pc)
+                            + cp2[cbase+k] * (p[pbase + k + 1] - pc)
+                            + cm2[cbase+k] * (p[pbase + k - 1] - pc);
+                        p[pbase + k] = pc + (flux - f[cbase+k]) / J;
                     }
                 }
             }
@@ -243,14 +246,15 @@ static void rbgs_sweep_3d_cpu_impl(
                                          + cp1[cbase+k] + cm1[cbase+k]
                                          + cp2[cbase+k] + cm2[cbase+k];
                         if (J < jcap_tol && J > -jcap_tol) continue;
-                        const scalar_t sum =
-                              cp0[cbase+k] * p[pbase + k + si]
-                            + cm0[cbase+k] * p[pbase + k - si]
-                            + cp1[cbase+k] * p[pbase + k + sj]
-                            + cm1[cbase+k] * p[pbase + k - sj]
-                            + cp2[cbase+k] * p[pbase + k + 1]
-                            + cm2[cbase+k] * p[pbase + k - 1];
-                        p[pbase + k] = (-f[cbase+k] + sum) / J;
+                        const scalar_t pc = p[pbase + k];
+                        const scalar_t flux =
+                              cp0[cbase+k] * (p[pbase + k + si] - pc)
+                            + cm0[cbase+k] * (p[pbase + k - si] - pc)
+                            + cp1[cbase+k] * (p[pbase + k + sj] - pc)
+                            + cm1[cbase+k] * (p[pbase + k - sj] - pc)
+                            + cp2[cbase+k] * (p[pbase + k + 1] - pc)
+                            + cm2[cbase+k] * (p[pbase + k - 1] - pc);
+                        p[pbase + k] = pc + (flux - f[cbase+k]) / J;
                     }
                 }
             }
@@ -303,13 +307,13 @@ static void jacobi_sweep_2d_cpu_impl(
                     const scalar_t J = cp0_row[j] + cm0_row[j] + cp1_row[j] + cm1_row[j];
                     if (J < jcap_tol && J > -jcap_tol) continue;
                     const int pj = j + 1;
-                    const scalar_t sum =
-                        cp0_row[j] * p_tmp[p_row_base + pj + stride_p]
-                      + cm0_row[j] * p_tmp[p_row_base + pj - stride_p]
-                      + cp1_row[j] * p_tmp[p_row_base + pj + 1]
-                      + cm1_row[j] * p_tmp[p_row_base + pj - 1];
-                    const scalar_t p_new = (-f_row[j] + sum) / J;
-                    p[p_row_base + pj] = w * p_new + ((scalar_t)1 - w) * p_tmp[p_row_base + pj];
+                    const scalar_t pc = p_tmp[p_row_base + pj];
+                    const scalar_t flux =
+                        cp0_row[j] * (p_tmp[p_row_base + pj + stride_p] - pc)
+                      + cm0_row[j] * (p_tmp[p_row_base + pj - stride_p] - pc)
+                      + cp1_row[j] * (p_tmp[p_row_base + pj + 1] - pc)
+                      + cm1_row[j] * (p_tmp[p_row_base + pj - 1] - pc);
+                    p[p_row_base + pj] = pc + w * (flux - f_row[j]) / J;
                 }
             }
         });
@@ -359,15 +363,15 @@ static void jacobi_sweep_3d_cpu_impl(
                                          + cp2[cbase+k] + cm2[cbase+k];
                         if (J < jcap_tol && J > -jcap_tol) continue;
                         const int pk = k;
-                        const scalar_t sum =
-                              cp0[cbase+k] * p_tmp[pbase + pk + si]
-                            + cm0[cbase+k] * p_tmp[pbase + pk - si]
-                            + cp1[cbase+k] * p_tmp[pbase + pk + sj]
-                            + cm1[cbase+k] * p_tmp[pbase + pk - sj]
-                            + cp2[cbase+k] * p_tmp[pbase + pk + 1]
-                            + cm2[cbase+k] * p_tmp[pbase + pk - 1];
-                        const scalar_t p_new = (-f[cbase+k] + sum) / J;
-                        p[pbase + pk] = w * p_new + ((scalar_t)1 - w) * p_tmp[pbase + pk];
+                        const scalar_t pc = p_tmp[pbase + pk];
+                        const scalar_t flux =
+                              cp0[cbase+k] * (p_tmp[pbase + pk + si] - pc)
+                            + cm0[cbase+k] * (p_tmp[pbase + pk - si] - pc)
+                            + cp1[cbase+k] * (p_tmp[pbase + pk + sj] - pc)
+                            + cm1[cbase+k] * (p_tmp[pbase + pk - sj] - pc)
+                            + cp2[cbase+k] * (p_tmp[pbase + pk + 1] - pc)
+                            + cm2[cbase+k] * (p_tmp[pbase + pk - 1] - pc);
+                        p[pbase + pk] = pc + w * (flux - f[cbase+k]) / J;
                     }
                 }
             }
@@ -414,9 +418,10 @@ static void mg_residual_2d_cpu_impl(
                 const scalar_t pim = ((int)i > 0)      ? p[p_row_base + pj - stride_p] : pc;
                 const scalar_t pjp = (j < Ny - 1) ? p[p_row_base + pj + 1] : pc;
                 const scalar_t pjm = (j > 0)      ? p[p_row_base + pj - 1] : pc;
-                const scalar_t s = cp0_row[j] * pip + cm0_row[j] * pim
-                                 + cp1_row[j] * pjp + cm1_row[j] * pjm;
-                r_row[j] = f_row[j] - s + J * pc;
+                const scalar_t flux =
+                      cp0_row[j] * (pip - pc) + cm0_row[j] * (pim - pc)
+                    + cp1_row[j] * (pjp - pc) + cm1_row[j] * (pjm - pc);
+                r_row[j] = f_row[j] - flux;
             }
         }
     });
@@ -455,10 +460,11 @@ static void mg_residual_3d_cpu_impl(
                     const scalar_t pjm = (j > 0) ? p[pbase + k - sj] : pc;
                     const scalar_t pkp = (k < Nz - 1) ? p[pbase + k + 1] : pc;
                     const scalar_t pkm = (k > 0) ? p[pbase + k - 1] : pc;
-                    const scalar_t s = cp0[cbase+k] * pip + cm0[cbase+k] * pim
-                                     + cp1[cbase+k] * pjp + cm1[cbase+k] * pjm
-                                     + cp2[cbase+k] * pkp + cm2[cbase+k] * pkm;
-                    r[cbase+k] = f[cbase+k] - s + J * pc;
+                    const scalar_t flux =
+                          cp0[cbase+k] * (pip - pc) + cm0[cbase+k] * (pim - pc)
+                        + cp1[cbase+k] * (pjp - pc) + cm1[cbase+k] * (pjm - pc)
+                        + cp2[cbase+k] * (pkp - pc) + cm2[cbase+k] * (pkm - pc);
+                    r[cbase+k] = f[cbase+k] - flux;
                 }
             }
         }
@@ -537,12 +543,11 @@ static void restrict_face_2d_cpu_impl(
         at::parallel_for(0, Nc0 + 1, 1, [&](int64_t Istart, int64_t Iend) {
             for (int64_t I = Istart; I < Iend; ++I) {
                 for (int J = 0; J < Nc1; ++J) {
-                    const int i0 = (int)I * 2, j0 = J * 2;
-                    scalar_t s = (scalar_t)0;
-                    if (i0 < Nf0 + 1) {
-                        if (j0 < Nf1)       s += src[i0 * Nf1 + j0];
-                        if (j0 + 1 < Nf1)   s += src[i0 * Nf1 + (j0+1)];
-                    }
+                    const int i0 = std::min((int)I * 2, Nf0);
+                    const int j0 = std::min(J * 2, Nf1 - 1);
+                    const int j1 = std::min(J * 2 + 1, Nf1 - 1);
+                    const scalar_t s = src[i0 * Nf1 + j0]
+                                     + src[i0 * Nf1 + j1];
                     dst[(int)I * Nc1 + J] = s * (scalar_t)0.5;
                 }
             }
@@ -551,12 +556,11 @@ static void restrict_face_2d_cpu_impl(
         at::parallel_for(0, Nc0, 1, [&](int64_t Istart, int64_t Iend) {
             for (int64_t I = Istart; I < Iend; ++I) {
                 for (int J = 0; J < Nc1 + 1; ++J) {
-                    const int i0 = (int)I * 2, j0 = J * 2;
-                    scalar_t s = (scalar_t)0;
-                    if (j0 < Nf1 + 1) {
-                        if (i0 < Nf0)       s += src[i0 * (Nf1 + 1) + j0];
-                        if (i0 + 1 < Nf0)   s += src[(i0+1) * (Nf1 + 1) + j0];
-                    }
+                    const int i0 = std::min((int)I * 2, Nf0 - 1);
+                    const int i1 = std::min((int)I * 2 + 1, Nf0 - 1);
+                    const int j0 = std::min(J * 2, Nf1);
+                    const scalar_t s = src[i0 * (Nf1 + 1) + j0]
+                                     + src[i1 * (Nf1 + 1) + j0];
                     dst[(int)I * (Nc1 + 1) + J] = s * (scalar_t)0.5;
                 }
             }
@@ -582,15 +586,14 @@ static void restrict_face_3d_cpu_impl(
             for (int64_t I = Istart; I < Iend; ++I) {
                 for (int J = 0; J < Nc1; ++J) {
                     for (int K = 0; K < Nc2; ++K) {
-                        const int i0 = (int)I * 2, j0 = J * 2, k0 = K * 2;
+                        const int i0 = std::min((int)I * 2, Nf0);
+                        const int j0 = J * 2, k0 = K * 2;
                         scalar_t s = (scalar_t)0;
-                        if (i0 < Nf0 + 1) {
-                            for (int dj = 0; dj < nj; ++dj) {
-                                int jj = j0 + dj; if (jj >= Nf1) continue;
-                                for (int dk = 0; dk < nk; ++dk) {
-                                    int kk = k0 + dk; if (kk >= Nf2) continue;
-                                    s += src[i0 * sif + jj * sjf + kk];
-                                }
+                        for (int dj = 0; dj < nj; ++dj) {
+                            const int jj = std::min(j0 + dj, Nf1 - 1);
+                            for (int dk = 0; dk < nk; ++dk) {
+                                const int kk = std::min(k0 + dk, Nf2 - 1);
+                                s += src[i0 * sif + jj * sjf + kk];
                             }
                         }
                         dst[(int)I * sic + J * sjc + K] = s * (scalar_t)0.5;
@@ -606,15 +609,15 @@ static void restrict_face_3d_cpu_impl(
             for (int64_t I = Istart; I < Iend; ++I) {
                 for (int J = 0; J < Nc1 + 1; ++J) {
                     for (int K = 0; K < Nc2; ++K) {
-                        const int i0 = (int)I * 2, j0 = J * 2, k0 = K * 2;
+                        const int i0 = (int)I * 2;
+                        const int j0 = std::min(J * 2, Nf1);
+                        const int k0 = K * 2;
                         scalar_t s = (scalar_t)0;
-                        if (j0 < Nf1 + 1) {
-                            for (int di = 0; di < ni; ++di) {
-                                int ii = i0 + di; if (ii >= Nf0) continue;
-                                for (int dk = 0; dk < nk; ++dk) {
-                                    int kk = k0 + dk; if (kk >= Nf2) continue;
-                                    s += src[ii * sif_src + j0 * sjf_src + kk];
-                                }
+                        for (int di = 0; di < ni; ++di) {
+                            const int ii = std::min(i0 + di, Nf0 - 1);
+                            for (int dk = 0; dk < nk; ++dk) {
+                                const int kk = std::min(k0 + dk, Nf2 - 1);
+                                s += src[ii * sif_src + j0 * sjf_src + kk];
                             }
                         }
                         dst[(int)I * sif_dst + J * sjf_dst + K] = s * (scalar_t)0.5;
@@ -629,15 +632,15 @@ static void restrict_face_3d_cpu_impl(
             for (int64_t I = Istart; I < Iend; ++I) {
                 for (int J = 0; J < Nc1; ++J) {
                     for (int K = 0; K < Nc2 + 1; ++K) {
-                        const int i0 = (int)I * 2, j0 = J * 2, k0 = K * 2;
+                        const int i0 = (int)I * 2;
+                        const int j0 = J * 2;
+                        const int k0 = std::min(K * 2, Nf2);
                         scalar_t s = (scalar_t)0;
-                        if (k0 < Nf2 + 1) {
-                            for (int di = 0; di < ni; ++di) {
-                                int ii = i0 + di; if (ii >= Nf0) continue;
-                                for (int dj = 0; dj < nj; ++dj) {
-                                    int jj = j0 + dj; if (jj >= Nf1) continue;
-                                    s += src[ii * sif_src + jj * sjf_src + k0];
-                                }
+                        for (int di = 0; di < ni; ++di) {
+                            const int ii = std::min(i0 + di, Nf0 - 1);
+                            for (int dj = 0; dj < nj; ++dj) {
+                                const int jj = std::min(j0 + dj, Nf1 - 1);
+                                s += src[ii * sif_src + jj * sjf_src + k0];
                             }
                         }
                         dst[(int)I * sif_dst + J * sjf_dst + K] = s * (scalar_t)0.5;
@@ -685,11 +688,11 @@ static void prolongate_add_2d_cpu_impl(
     at::parallel_for(0, Nx_f, 1, [&](int64_t istart, int64_t iend) {
         for (int64_t i = istart; i < iend; ++i) {
             int il, ir; scalar_t wil, wir;
-            linear_weights<scalar_t>((int)i, Nx_c, Nx_f, il, ir, wil, wir);
+            linear_weights<scalar_t>((int)i, Nx_c, 2 * Nx_c, il, ir, wil, wir);
             const int i_p = (int)i + 1;
             for (int j = 0; j < Ny_f; ++j) {
                 int jl, jr; scalar_t wjl, wjr;
-                linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+                linear_weights<scalar_t>(j, Ny_c, 2 * Ny_c, jl, jr, wjl, wjr);
                 const int j_p = j + 1;
                 // ec indices in ghost-padded array: +1 for ghost offset
                 const int e_ll = (il + 1) * sec + (jl + 1);
@@ -720,15 +723,15 @@ static void prolongate_add_3d_cpu_impl(
     at::parallel_for(0, Nx_f, 1, [&](int64_t istart, int64_t iend) {
         for (int64_t i = istart; i < iend; ++i) {
             int il, ir; scalar_t wil, wir;
-            linear_weights<scalar_t>((int)i, Nx_c, Nx_f, il, ir, wil, wir);
+            linear_weights<scalar_t>((int)i, Nx_c, 2 * Nx_c, il, ir, wil, wir);
             const int i_p = (int)i + 1;
             for (int j = 0; j < Ny_f; ++j) {
                 int jl, jr; scalar_t wjl, wjr;
-                linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+                linear_weights<scalar_t>(j, Ny_c, 2 * Ny_c, jl, jr, wjl, wjr);
                 const int j_p = j + 1;
                 for (int k = 0; k < Nz_f; ++k) {
                     int kl, kr; scalar_t wkl, wkr;
-                    linear_weights<scalar_t>(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
+                    linear_weights<scalar_t>(k, Nz_c, 2 * Nz_c, kl, kr, wkl, wkr);
                     const int k_p = k + 1;
                     const int e_lll = (il+1)*sec + (jl+1)*sjc + (kl+1);
                     const int e_llr = (il+1)*sec + (jl+1)*sjc + (kr+1);
@@ -771,11 +774,11 @@ static void restrict_fw_2d_cpu_impl(
     std::fill(rc, rc + (size_t)Nx_c * Ny_c, (scalar_t)0);
     for (int i = 0; i < Nx_f; ++i) {
         int il, ir; scalar_t wil, wir;
-        linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
+        linear_weights<scalar_t>(i, Nx_c, 2 * Nx_c, il, ir, wil, wir);
         const int ii[2] = {il, ir}; const scalar_t wi[2] = {wil, wir};
         for (int j = 0; j < Ny_f; ++j) {
             int jl, jr; scalar_t wjl, wjr;
-            linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+            linear_weights<scalar_t>(j, Ny_c, 2 * Ny_c, jl, jr, wjl, wjr);
             const int jj[2] = {jl, jr}; const scalar_t wj[2] = {wjl, wjr};
             const scalar_t val = r[i * Ny_f + j];
             for (int a = 0; a < 2; ++a)
@@ -796,15 +799,15 @@ static void restrict_fw_3d_cpu_impl(
     std::fill(rc, rc + (size_t)Nx_c * sic, (scalar_t)0);
     for (int i = 0; i < Nx_f; ++i) {
         int il, ir; scalar_t wil, wir;
-        linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
+        linear_weights<scalar_t>(i, Nx_c, 2 * Nx_c, il, ir, wil, wir);
         const int ii[2] = {il, ir}; const scalar_t wi[2] = {wil, wir};
         for (int j = 0; j < Ny_f; ++j) {
             int jl, jr; scalar_t wjl, wjr;
-            linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+            linear_weights<scalar_t>(j, Ny_c, 2 * Ny_c, jl, jr, wjl, wjr);
             const int jj[2] = {jl, jr}; const scalar_t wj[2] = {wjl, wjr};
             for (int k = 0; k < Nz_f; ++k) {
                 int kl, kr; scalar_t wkl, wkr;
-                linear_weights<scalar_t>(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
+                linear_weights<scalar_t>(k, Nz_c, 2 * Nz_c, kl, kr, wkl, wkr);
                 const int kk[2] = {kl, kr}; const scalar_t wk[2] = {wkl, wkr};
                 const scalar_t val = r[i * sif + j * sjf + k];
                 for (int a = 0; a < 2; ++a)
@@ -947,8 +950,10 @@ static void vcycle_2d_cpu(
                              Nx, Ny, jcap_tol, r_out);
 
     if (Nx > 2 && Ny > 2) {
-        const int Nx_c = Nx / 2;
-        const int Ny_c = Ny / 2;
+        // Factor-two coarsening after a virtual high-side Neumann pad keeps
+        // the final physical cell when a dimension is odd.
+        const int Nx_c = (Nx + 1) / 2;
+        const int Ny_c = (Ny + 1) / 2;
 
         // Restrict face arrays
         std::vector<scalar_t> ch_c((Nx_c + 1) * Ny_c);
@@ -1110,7 +1115,9 @@ static void vcycle_3d_cpu(
                              Nx, Ny, Nz, jcap_tol, r_out);
 
     if (Nx > 2 && Ny > 2 && Nz > 2) {
-        const int Nx_c = Nx / 2, Ny_c = Ny / 2, Nz_c = Nz / 2;
+        const int Nx_c = (Nx + 1) / 2;
+        const int Ny_c = (Ny + 1) / 2;
+        const int Nz_c = (Nz + 1) / 2;
 
         std::vector<scalar_t> ch_c((Nx_c + 1) * Ny_c * Nz_c);
         std::vector<scalar_t> cv_c(Nx_c * (Ny_c + 1) * Nz_c);

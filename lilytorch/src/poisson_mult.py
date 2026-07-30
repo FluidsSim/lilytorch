@@ -169,21 +169,6 @@ class _MultigridPoissonSolver:
     # Stencil operations  (dimension-agnostic)
     # ------------------------------------------------------------------
     @staticmethod
-    def compute_sum(cfaces, p):
-        """Sum of  c_{d+} p_{i+1} + c_{d-} p_{i-1}  over all dims.
-
-        cfaces : list of (c_plus, c_minus) per dimension.
-        """
-        ndim  = p.ndim
-        inner = _inner(ndim)
-        s = torch.zeros_like(p[inner])
-        for d, (cp, cm) in enumerate(cfaces):
-            fwd = list(inner); fwd[d] = slice(2, None)
-            bwd = list(inner); bwd[d] = slice(None, -2)
-            s = s + cp * p[tuple(fwd)] + cm * p[tuple(bwd)]
-        return s
-
-    @staticmethod
     def compute_J(cfaces):
         """Diagonal: J = sum_d (c_{d+} + c_{d-})."""
         J = None
@@ -245,11 +230,16 @@ class _MultigridPoissonSolver:
     # SPD operator for CG
     # ------------------------------------------------------------------
     def _apply_op_spd(self, p, cfaces):
-        """Apply the SPD operator B(p) = J·p[inner] - compute_sum(cfaces, p).
+        """Apply the SPD operator B(p) in face-flux-difference form.
 
         This is the discrete *negative* Laplacian with variable coefficients
         scaled by h² (since the V-cycle works with h²-scaled quantities).
         Positive semi-definite: p^T B p ≥ 0  (kernel = constants).
+
+        Computing ``sum c*(p_cell - p_neighbor)`` directly avoids subtracting
+        two large absolute-pressure terms.  That is important in float32 for
+        stiff two-phase coefficients and also preserves gauge invariance to
+        the precision of each neighbour difference.
 
         Degenerate (solid) cells are zeroed out, consistent with the Jacobi
         masking in the V-cycle.
@@ -259,11 +249,16 @@ class _MultigridPoissonSolver:
         inner = _inner(ndim)
         J = self.compute_J(cfaces)
         active = J.abs() >= self.jcap_tol
-        s = self.compute_sum(cfaces, p)
-        s.addcmul_(J, p[inner], value=-1.0)    # s = sum - J*p  (in-place)
+        pc = p[inner]
+        out = torch.zeros_like(pc)
+        for d, (cp, cm) in enumerate(cfaces):
+            fwd = list(inner); fwd[d] = slice(2, None)
+            bwd = list(inner); bwd[d] = slice(None, -2)
+            out.addcmul_(cp, pc - p[tuple(fwd)])
+            out.addcmul_(cm, pc - p[tuple(bwd)])
         del J
-        s.neg_().mul_(active)                   # s = (J*p - sum) * active = result, in-place
-        return s
+        out.mul_(active)
+        return out
 
     # ------------------------------------------------------------------
     # Range / null-space handling for the CG drivers

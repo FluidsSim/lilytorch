@@ -390,8 +390,10 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
 
     // ---- Multigrid residual kernels ------------------------------------
     // mg_residual_2d / mg_residual_3d: compute
-    //   r = (f - A(p)) * (|J| >= jcap_tol)    where A(p) = sum - J*p
-    // with J and the active mask in registers only (no global allocations).
+    //   r = (f - A(p)) * (|J| >= jcap_tol)
+    // where A(p) is evaluated as sum_faces c_face*(p_neighbor - p_cell)
+    // to avoid cancellation of absolute-pressure terms in float32.  J and the
+    // active mask remain in registers only (no global allocations).
     // r must be a pre-allocated interior-shape tensor (no ghost cells);
     // p is ghost-padded.  Used to replace the J/active/sum/addcmul_/neg_
     // chain inside the multigrid V-cycle so neither J (~64 MB) nor active
