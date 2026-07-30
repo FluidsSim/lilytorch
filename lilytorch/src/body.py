@@ -46,6 +46,44 @@ def _import_rotation():
     from scipy.spatial.transform import Rotation
     return Rotation
 
+def _pick_contour(contours, body_label):
+    """Pick the contour a 2-D body will use, reporting anything discarded.
+
+    The 2-D Lagrangian kernel derives each marker's normal from its NEIGHBOURS
+    and closes the loop by wrapping (``lagrangian_forces_2d``), so one body is
+    one closed loop: a disconnected level set cannot be represented by a single
+    body.  Taking ``contours[0]`` silently immersed whichever piece skimage
+    happened to return first, which for a two-piece body is an arbitrary half.
+
+    Returns the LONGEST contour and warns with the fraction of outline dropped,
+    so the loss is visible without breaking bodies whose extra "contours" are
+    short open fragments where the level set meets the sampling box.
+    """
+    if not contours:
+        raise ValueError(
+            f"{body_label}: no zero level set found in the sampled SDF, so the "
+            "body has no 2-D contour. Check that it lies inside the grid."
+        )
+    lengths = [
+        float(np.sum(np.hypot(np.diff(c[:, 0]), np.diff(c[:, 1]))))
+        for c in contours
+    ]
+    best = int(np.argmax(lengths))
+    total = float(sum(lengths))
+    if len(contours) > 1 and total > 0.0:
+        dropped = 1.0 - lengths[best] / total
+        if dropped > _CONTOUR_DROP_WARN:
+            print(
+                f"  WARNING {body_label}: level set has {len(contours)} "
+                f"disconnected pieces; immersing the longest and dropping "
+                f"{100.0 * dropped:.1f}% of the outline. One 2-D body is one "
+                "closed loop, so split the geometry across links (or run in "
+                "3-D) if every piece must be wetted."
+            )
+    return contours[best]
+
+#: Discarded-outline fraction above which _pick_contour warns.
+_CONTOUR_DROP_WARN = 0.01
 #: Sample-count ceiling for a composite body's union-surface marching cubes.
 _MAX_SURFACE_SAMPLES = 8.0e6
 #: Marching-cubes cells across the SMALLEST geom of a composite link.  Flat
@@ -1131,7 +1169,10 @@ class BodyAnalytical(Body):
         xnp = xcnt.cpu().numpy()
         ynp = ycnt.cpu().numpy()
 
-        cnt = np.array(measure.find_contours(sdf_np - self.h, 0)[0]).T
+        cnt = np.array(_pick_contour(
+            measure.find_contours(sdf_np - self.h, 0),
+            f"body '{getattr(self, 'name', type(self).__name__)}'",
+        )).T
         cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
         cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
 
@@ -2191,7 +2232,10 @@ class BodyMesh(Body):
         sdf_val = skfmm.distance(binary_2d, dx=[dx, dy]) - self.suit
 
         # ---- contour computation (2-D only) ----------------------------
-        cnt = np.array(measure.find_contours(sdf_val-self.h, 0)[0]).T
+        cnt = np.array(_pick_contour(
+            measure.find_contours(sdf_val - self.h, 0),
+            f"mesh '{self.mesh_file}'",
+        )).T
         cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
         cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
 
