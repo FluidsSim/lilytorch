@@ -2573,7 +2573,30 @@ class MultiAnimatBodies(Body):
             sdf_folder = os.path.dirname(animat.sdf)
             morphology_links = getattr(getattr(animat, "morphology", None), "links", None)
 
+            # ---- link identity resolution (BY NAME, never by position) ----
+            # The index stored in ``body_ids`` addresses the FARMS *sensor*
+            # link arrays (poses/velocities in BDIMhandler, ``data2xfrc`` for
+            # force application), which are ordered by
+            # ``control.sensors.links``.  That list, ``morphology.links`` and
+            # ``sdf.links`` are three independently ordered lists and the
+            # sensor list is frequently the shortest (salamandra_robotica:
+            # 14 sensors for 19 SDF links), so none of them may be zipped
+            # positionally.
+            sensor_links = getattr(
+                getattr(getattr(animat, "control", None), "sensors", None),
+                "links", None,
+            )
+            sensor_index = (
+                {str(name): idx for idx, name in enumerate(sensor_links)}
+                if sensor_links else None
+            )
+            morphology_by_name = (
+                {str(getattr(ml, "name", None)): ml for ml in morphology_links}
+                if morphology_links else {}
+            )
+
             for link_i, link in enumerate(sdf.links):
+                link_name = link["name"]
                 # ---- extract MuJoCo / SDF visual colour (RGBA) ----
                 _link_rgba = None
                 if hasattr(link, "visuals") and link.visuals:
@@ -2581,27 +2604,40 @@ class MultiAnimatBodies(Body):
                     if hasattr(_vis, "color") and _vis.color is not None:
                         _link_rgba = list(_vis.color)  # [R, G, B, A]
 
-                morphology_link = None
-                if morphology_links is not None and link_i < len(morphology_links):
-                    morphology_link = morphology_links[link_i]
+                morphology_link = morphology_by_name.get(link_name)
 
-                link_fluid_interaction = True
-                if morphology_link is not None:
-                    link_fluid_interaction = getattr(
-                        morphology_link,
-                        "fluid_interaction",
-                        link_fluid_interaction,
-                    )
+                # ``morphology.fluid_interaction`` must NOT gate immersion: it
+                # selects the links driven by FARMS' analytical drag model
+                # (farms_mujoco swimming ``drag.pyx``), which is the
+                # alternative to this CFD coupling rather than a switch on it.
+                # Configs resolved by the fluid solver set it False on every
+                # link, so honouring it here would empty the domain.
+
+                # Index into the FARMS sensor link arrays.  Without a sensor
+                # entry there is no pose, no velocity and no xfrc row to drive
+                # or load this link, so it cannot be coupled at all -- skip it
+                # loudly rather than borrowing a neighbour's kinematics.  Add
+                # the name to ``sensors_links`` / ``sensors_xfrc`` in the
+                # animat config to wet it (MuJoCo already builds a body and
+                # frame sensors for every SDF link).
+                if sensor_index is None:
+                    link_id = link_i  # no sensor list: legacy positional order
+                else:
+                    link_id = sensor_index.get(link_name)
+                    if link_id is None:
+                        print(
+                            f"  Skipping link '{link_name}' of '{animat.sdf}': "
+                            "not in control.sensors.links, so it has no pose / "
+                            "velocity / xfrc channel for fluid coupling."
+                        )
+                        continue
 
                 collisions = link["collisions"]
                 if not collisions:
-                    if link_fluid_interaction:
-                        raise ValueError(
-                            f"Link '{link['name']}' in '{animat.sdf}' has no collision geometry "
-                            "but morphology.fluid_interaction=True. "
-                            "Add collision geometry or disable fluid interaction for that link."
-                        )
-                    print(f"  Skipping non-fluid link without collisions: {link['name']}")
+                    print(
+                        f"  Skipping link '{link_name}' of '{animat.sdf}': "
+                        "no collision geometry to immerse."
+                    )
                     continue
 
                 initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
@@ -2901,11 +2937,11 @@ class MultiAnimatBodies(Body):
 
                     body.mujoco_rgba = _link_rgba
                     body.local_pose = collision_pose
-                    body.name = link["name"]
+                    body.name = link_name
                     body.collision_name = collision["name"] if "name" in collision else None
                     body.link_extras = link_extras
                     self.bodies.append(body)
-                    self.body_ids.append([animat_i, link_i])
+                    self.body_ids.append([animat_i, link_id])
 
         self.nbodies = len(self.bodies)
         gs = self.grid_shape

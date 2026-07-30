@@ -627,19 +627,52 @@ class BDIMhandler:
             mass, max_rbound = self._backend.get_body_mass_radius(animat_id, link_id)
             self._buoy_mass[body_i] = mass
             if experiment_options is not None:
-                try:
-                    density = float(
-                        experiment_options.animats[animat_id]
-                        .morphology.links[link_id].density
-                    )
-                except Exception:
-                    density = float(self.fluid_solver.rho)
-                if density > 0.0:
+                # Look the density up BY LINK NAME.  ``link_id`` indexes the
+                # sensor arrays, which are ordered independently of (and are
+                # often shorter than) ``morphology.links``; the previous
+                # positional lookup wrapped in a bare ``except Exception``
+                # silently substituted the FLUID density for every link past
+                # the end of the list -- e.g. the salamandra tail and tibias
+                # were buoyed at 1000 kg/m3 instead of the configured 800.
+                link_name = getattr(comp.bodies[body_i], "name", None)
+                density = self._link_density(
+                    experiment_options, animat_id, link_name)
+                if density is not None and density > 0.0:
                     self._buoy_density[body_i] = density
 
             self._buoy_height[body_i] = 0.5 * max_rbound
 
         self._buoyancy_initialized = True
+
+    def _link_density(self, experiment_options, animat_id, link_name):
+        """Configured density [kg/m^3] of one link, resolved by NAME.
+
+        Returns ``None`` (and warns once per link) when the animat config
+        carries no entry for the link, so the caller falls back to the fluid
+        density -- neutral buoyancy -- with the substitution visible instead
+        of swallowed.
+        """
+        links = getattr(
+            getattr(experiment_options.animats[animat_id], "morphology", None),
+            "links", None,
+        )
+        if links:
+            for morphology_link in links:
+                if str(getattr(morphology_link, "name", None)) == str(link_name):
+                    density = getattr(morphology_link, "density", None)
+                    if density is not None:
+                        return float(density)
+                    break
+        warned = self.__dict__.setdefault("_density_warned", set())
+        if (animat_id, link_name) not in warned:
+            warned.add((animat_id, link_name))
+            print(
+                f"[BDIMhandler] no morphology density for link "
+                f"'{link_name}' (animat {animat_id}); buoying it at the fluid "
+                f"density {float(self.fluid_solver.rho)} kg/m3 (neutral). Add "
+                "the link to morphology.links to set its density."
+            )
+        return None
 
     # ==================================================================
     #  update: FARMS kinematics  ->  SDF fields + body velocities
