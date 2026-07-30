@@ -125,14 +125,13 @@ class NativeWholeStepGraphRunner:
             graph = torch.cuda.CUDAGraph()
             gc.disable()
             try:
-                with torch.cuda.graph(graph):
+                # Output/render workers can remain active while the simulation
+                # thread captures.  Their unrelated CUDA activity must not
+                # invalidate this thread's capture.
+                with torch.cuda.graph(
+                    graph, capture_error_mode="thread_local"
+                ):
                     issue()
-            except RuntimeError:
-                graph.reset()
-                del graph
-                self._seen[key] = 0   # restart warm-up cycle
-                gc.enable()
-                return
             finally:
                 gc.enable()
 
