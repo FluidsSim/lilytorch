@@ -65,6 +65,7 @@ interp_data/
 interp_data_2d/
 interp_data_3d/
 results/
+lilytorch_output/
 __pycache__
 figures/
 output/
