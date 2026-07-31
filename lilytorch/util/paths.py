@@ -4,11 +4,16 @@ import datetime
 import os
 from pathlib import Path
 
-# Derived from this file's location (<root>/util/paths.py) rather than from
-# lilytorch.__file__, which is None whenever the package is picked up as a
-# namespace package -- as happens when the working directory sits above the
-# editable-install checkout and shadows it.
-lilytorch_repo_root = str(Path(__file__).resolve().parent.parent)
+def _find_repo_root() -> Path:
+    """Walk up from this file until we find a pyproject.toml marker."""
+    current = Path(__file__).resolve().parent
+    for _ in range(10):  # safety limit
+        if (current / "pyproject.toml").exists():
+            return current
+        current = current.parent
+    raise FileNotFoundError("Could not locate lilytorch repo root (no pyproject.toml found)")
+
+lilytorch_repo_root = str(_find_repo_root())
 examples_path = os.path.join(lilytorch_repo_root, "examples")
 sdfs_path = os.path.join(examples_path, "sdfs")
 

@@ -1,5 +1,6 @@
 
 import logging
+import itertools
 import math  # used for evaluating math operations for sdfs
 import os
 
@@ -40,6 +41,82 @@ def _import_measure():
 def _import_ndimage():
     from scipy import ndimage
     return ndimage
+
+def _import_rotation():
+    """Lazy import for scipy Rotation (euler -> matrix for geom local poses)."""
+    from scipy.spatial.transform import Rotation
+    return Rotation
+
+def _plane_projection(collision_pose):
+    """Project a geom's pose onto the 2-D xy plane.
+
+    Returns ``(centre_xy, rot3, in_plane_rot)``:
+
+    ``centre_xy``    the geom's in-plane translation;
+    ``rot3``         its full 3x3 rotation;
+    ``in_plane_rot`` the 2x2 in-plane rotation when the pose maps the xy plane
+                     to itself, else ``None``.
+
+    A 2-D run needs the geom's CROSS-SECTION, which is a projection, not a
+    slice of the rotation: for an out-of-plane tilt the 2x2 block of ``rot3``
+    is singular (``R_x(90 deg)[:2,:2]`` has determinant 0) and is not a
+    rotation at all.  Callers therefore project each shape's defining
+    direction, and only use ``in_plane_rot`` when the plane is preserved.
+    """
+    pose = np.asarray(collision_pose, dtype=float)
+    rot3 = _import_rotation().from_euler("xyz", pose[3:]).as_matrix()
+    in_plane_rot = rot3[:2, :2] if abs(rot3[2, 2]) > 1.0 - 1e-9 else None
+    return pose[:2], rot3, in_plane_rot
+
+
+def _pick_contour(contours, body_label):
+    """Pick the contour a 2-D body will use, reporting anything discarded.
+
+    The 2-D Lagrangian kernel derives each marker's normal from its NEIGHBOURS
+    and closes the loop by wrapping (``lagrangian_forces_2d``), so one body is
+    one closed loop: a disconnected level set cannot be represented by a single
+    body.  Taking ``contours[0]`` silently immersed whichever piece skimage
+    happened to return first, which for a two-piece body is an arbitrary half.
+
+    Returns the LONGEST contour and warns with the fraction of outline dropped,
+    so the loss is visible without breaking bodies whose extra "contours" are
+    short open fragments where the level set meets the sampling box.
+    """
+    if not contours:
+        raise ValueError(
+            f"{body_label}: no zero level set found in the sampled SDF, so the "
+            "body has no 2-D contour. Check that it lies inside the grid."
+        )
+    lengths = [
+        float(np.sum(np.hypot(np.diff(c[:, 0]), np.diff(c[:, 1]))))
+        for c in contours
+    ]
+    best = int(np.argmax(lengths))
+    total = float(sum(lengths))
+    if len(contours) > 1 and total > 0.0:
+        dropped = 1.0 - lengths[best] / total
+        if dropped > _CONTOUR_DROP_WARN:
+            print(
+                f"  WARNING {body_label}: level set has {len(contours)} "
+                f"disconnected pieces; immersing the longest and dropping "
+                f"{100.0 * dropped:.1f}% of the outline. One 2-D body is one "
+                "closed loop, so split the geometry across links (or run in "
+                "3-D) if every piece must be wetted."
+            )
+    return contours[best]
+
+#: Discarded-outline fraction above which _pick_contour warns.
+_CONTOUR_DROP_WARN = 0.01
+#: Sample-count ceiling for a composite body's union-surface marching cubes.
+_MAX_SURFACE_SAMPLES = 8.0e6
+#: Marching-cubes cells across the SMALLEST geom of a composite link.  Flat
+#: faces alias badly when under-resolved -- a cube's area is 9 % low at 8 cells
+#: across and exact by 16 -- so this is the accuracy knob for Lagrangian
+#: surfaces; raising it costs samples cubically, bounded by the ceiling above.
+_SURFACE_CELLS_PER_GEOM = 16.0
+#: Floor on the smallest child extent, so a degenerate geom cannot drive the
+#: surface spacing to zero.
+_EPS_TINY = 1.0e-9
 
 def _extract_surface_triangulation_3d(sdf_val_np, xnp, ynp, znp, device, dtype):
     """Run marching cubes on a 3-D SDF grid and return triangle data.
@@ -807,6 +884,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             convexify          = body_pars["convexify"],
             scale              = body_pars["scale"],
             save_folder        = body_pars["save_folder"],
+            geometry_source    = body_pars.get("geometry_source", "collision"),
             **kwargs
         )
 
@@ -1063,9 +1141,22 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None, triangulate=None):
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None, triangulate=None, surface_h=None, surface_aabb=None, contour=None):
         super().__init__(device, x, y, z=z, eps=eps)
         self.sdf = sdf
+        # Optional pre-extracted 2-D contour, as a ``(2, N)`` array in body-local
+        # coordinates.  One body is one closed loop (the Lagrangian kernel wraps
+        # around each body's markers), so a link whose union has several loops
+        # is built as several bodies that SHARE this composite SDF and differ
+        # only in which loop each carries.
+        self._contour = contour
+        # Optional dedicated grid for the Lagrangian surface extraction.  When
+        # both are None the surface comes off the fluid grid, which cannot see a
+        # geom smaller than a cell; a composite body sets them so its surface
+        # resolves its SMALLEST child rather than the flow scale, on a box
+        # tight to the geometry rather than the BDIM-padded ``local_aabb``.
+        self._surface_h = surface_h
+        self._surface_aabb = surface_aabb
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
         self.plotting = plotting
@@ -1100,16 +1191,24 @@ class BodyAnalytical(Body):
         xcnt = self.x - xmid
         ycnt = self.y - ymid
 
-        X, Y = torch.meshgrid(xcnt, ycnt, indexing="ij")
-        sdf_cnt = self.sdf(X, Y)
+        if self._contour is not None:
+            # Loop supplied by the caller, already in body-local coordinates.
+            cnt = np.array(self._contour, dtype=float)
+            sdf_np = None
+        else:
+            X, Y = torch.meshgrid(xcnt, ycnt, indexing="ij")
+            sdf_cnt = self.sdf(X, Y)
 
-        sdf_np = sdf_cnt.cpu().numpy()
-        xnp = xcnt.cpu().numpy()
-        ynp = ycnt.cpu().numpy()
+            sdf_np = sdf_cnt.cpu().numpy()
+            xnp = xcnt.cpu().numpy()
+            ynp = ycnt.cpu().numpy()
 
-        cnt = np.array(measure.find_contours(sdf_np - self.h, 0)[0]).T
-        cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
-        cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
+            cnt = np.array(_pick_contour(
+                measure.find_contours(sdf_np - self.h, 0),
+                f"body '{getattr(self, 'name', type(self).__name__)}'",
+            )).T
+            cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
+            cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
 
         ds = self.h
         x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
@@ -1146,7 +1245,7 @@ class BodyAnalytical(Body):
             cnt_hi = self.cnt.max(dim=1).values + band_margin
             self.local_aabb = torch.stack([cnt_lo, cnt_hi], dim=0)
 
-        if self.plotting:
+        if self.plotting and sdf_np is not None:
             _, plt, cm = _import_matplotlib()
             plt.imshow(
                 sdf_np.T,
@@ -1287,14 +1386,40 @@ class BodyAnalytical(Body):
         """
         tri_c = tri_n = tri_a = None
 
-        # ---- primary path: marching cubes on the fluid grid ----
+        # ---- primary path: marching cubes ----
         try:
-            xmid = (self.x.min() + self.x.max()) / 2
-            ymid = (self.y.min() + self.y.max()) / 2
-            zmid = (self.z.min() + self.z.max()) / 2
-            xcnt = self.x - xmid
-            ycnt = self.y - ymid
-            zcnt = self.z - zmid
+            surface_box = self._surface_aabb
+            if surface_box is None:
+                surface_box = self.local_aabb
+            if self._surface_h is not None and surface_box is not None:
+                # Body-local grid at an explicit spacing: resolves geometry the
+                # fluid grid is too coarse to see, and is far cheaper than
+                # sampling the whole domain because the box is body-sized.
+                box = surface_box.to(dtype=self.dtype)
+                step = float(self._surface_h)
+                axes = []
+                for axis in range(3):
+                    axis_lo = float(box[0, axis])
+                    axis_hi = float(box[1, axis])
+                    n_axis = max(
+                        4, int(math.ceil((axis_hi - axis_lo) / step)) + 1)
+                    # Half-cell stagger: a flat face lying exactly ON grid
+                    # nodes makes marching cubes emit degenerate triangles and
+                    # lose that face's area (a symmetric box came out 4 % small
+                    # without this).  Offsetting keeps every face mid-cell.
+                    axes.append(
+                        axis_lo + (torch.arange(
+                            n_axis, device=self.device, dtype=self.dtype,
+                        ) + 0.5) * step
+                    )
+                xcnt, ycnt, zcnt = axes
+            else:
+                xmid = (self.x.min() + self.x.max()) / 2
+                ymid = (self.y.min() + self.y.max()) / 2
+                zmid = (self.z.min() + self.z.max()) / 2
+                xcnt = self.x - xmid
+                ycnt = self.y - ymid
+                zcnt = self.z - zmid
             Xg, Yg, Zg = torch.meshgrid(xcnt, ycnt, zcnt, indexing="ij")
             sdf_cnt = self.sdf(Xg, Yg, Zg)
             sdf_np = sdf_cnt.cpu().numpy()
@@ -2141,7 +2266,10 @@ class BodyMesh(Body):
         sdf_val = skfmm.distance(binary_2d, dx=[dx, dy]) - self.suit
 
         # ---- contour computation (2-D only) ----------------------------
-        cnt = np.array(measure.find_contours(sdf_val-self.h, 0)[0]).T
+        cnt = np.array(_pick_contour(
+            measure.find_contours(sdf_val - self.h, 0),
+            f"mesh '{self.mesh_file}'",
+        )).T
         cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
         cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
 
@@ -2541,9 +2669,361 @@ class CompositeBodyMesh(Body):
 
 class MultiAnimatBodies(Body):
 
+    #: Accepted values for the ``geometry_source`` constructor argument.
+    GEOMETRY_SOURCES = ("collision", "visual", "auto")
+
+    def _child_boxes(self, body, D, band_margin):
+        """``(padded_box, raw_box)`` of one geom, in its OWN frame.
+
+        Both are ``[lo[], hi[]]`` lists of scalars.  The padded box is what the
+        BDIM band needs; the raw box is the geometry's true extent and is what
+        the surface resolution must be judged against -- the two are NOT
+        interchangeable, since for a sub-cell geom the padding is the whole box.
+
+        Follows the same source priority as ``BDIMhandler._body_local_aabb_2d``
+        / ``_body_local_aabb_3d``, because body types advertise their bounds
+        differently by design: ``BodyAnalytical`` derives ``local_aabb`` during
+        init, whereas a mesh body's local box IS its SDF table's axis range
+        (``sdf.x/y/z``) and it never sets ``local_aabb`` at all.  A 3-D mesh
+        additionally has only a stub ``cnt``, so the table is the only source.
+
+        Returns ``None`` if the geom advertises no bounds by any route.
+        """
+        def _split(lo_vals, hi_vals):
+            to_t = lambda v: torch.tensor(
+                float(v), device=self.device, dtype=self.dtype)
+            return [[to_t(v) for v in lo_vals], [to_t(v) for v in hi_vals]]
+
+        # ---- raw extent: bb, else the contour, else the SDF table ----
+        raw = None
+        raw_bb = getattr(body, "bb", None)
+        if raw_bb is not None and len(raw_bb) >= D:
+            try:
+                raw = _split([raw_bb[a][0] for a in range(D)],
+                             [raw_bb[a][1] for a in range(D)])
+            except (TypeError, IndexError):
+                raw = None
+        if raw is None:
+            cnt = getattr(body, "cnt", None)
+            if cnt is not None and cnt.numel() > D:
+                cnt_lo = cnt.min(dim=1).values
+                cnt_hi = cnt.max(dim=1).values
+                raw = _split([cnt_lo[a] for a in range(D)],
+                             [cnt_hi[a] for a in range(D)])
+        table = self._child_table_bounds(body, D)
+        if raw is None and table is not None:
+            # Table bounds include the mesh's own padding, so this over-states
+            # the geometry; it only ever feeds the surface-resolution choice,
+            # where erring large costs samples rather than correctness.
+            raw = _split([table[0][a] for a in range(D)],
+                         [table[1][a] for a in range(D)])
+        if raw is None:
+            return None
+
+        # ---- padded (band-covering) box ----
+        local_aabb = getattr(body, "local_aabb", None)
+        if local_aabb is not None:
+            padded = _split([local_aabb[0, a] for a in range(D)],
+                            [local_aabb[1, a] for a in range(D)])
+        elif table is not None:
+            # A mesh's table already extends past its surface; clip the union
+            # to it so the composite never queries the interpolator outside
+            # the region it can answer for.
+            padded = _split([table[0][a] for a in range(D)],
+                            [table[1][a] for a in range(D)])
+        else:
+            padded = _split([float(raw[0][a]) - band_margin for a in range(D)],
+                            [float(raw[1][a]) + band_margin for a in range(D)])
+        return padded, raw
+
+    @staticmethod
+    def _child_table_bounds(body, D):
+        """Valid interpolation box of a TABLE-backed geom, or ``None``.
+
+        A tabulated SDF clamps outside its sampled axes, so beyond them it
+        reports the box-edge distance rather than the true one.  The union has
+        to know where to stop trusting it.
+        """
+        if not hasattr(body, "mesh_file"):
+            return None                      # analytical: valid everywhere
+        table = getattr(body, "sdf", None)
+        axes = [getattr(table, name, None) for name in ("x", "y", "z")[:D]]
+        if any(axis is None or len(axis) < 2 for axis in axes):
+            return None
+        return (
+            torch.stack([axis[0].detach() for axis in axes]),
+            torch.stack([axis[-1].detach() for axis in axes]),
+        )
+
+    def _link_composite_body(self, link_bodies, link_name, sdf_path,
+                             initial_pose, eps):
+        """Collapse a link's per-geom bodies into ONE composite body (3-D).
+
+        Every geom of a link is rigidly attached to it, so their union is rigid
+        in the link frame: it can be sampled once into a body-local SDF table
+        (``BDIMhandler._init_interp``) and thereafter only rigidly transformed,
+        exactly like a single geom.  The ``min`` below is therefore evaluated at
+        init, never per step.
+
+        Collapsing is about correctness, not just cost.  ``BodyAnalytical``
+        marching-cubes its SDF to get the Lagrangian surface, so a composite
+        yields the true **union** triangulation -- disconnected pieces included,
+        which is why two separate eye spheres work.  Keeping one body per geom
+        instead would hand the Lagrangian readout each geom's *own* full
+        surface, including the facets buried inside a sibling, and those sample
+        pressure from the body interior.  (The Eulerian readout is immune: it
+        integrates the union SDF and partitions the result.)
+
+        In 2-D the union is built the same way, but the Lagrangian kernel wraps
+        around each body's markers, so one body is one closed loop: the union
+        contour is split into its connected loops and one body is emitted per
+        loop, all sharing this SDF and all mapping to the same link.  Collapsing
+        also fixes 2-D geom placement outright, because the 2-D update path
+        ignores ``local_pose`` and so used to stack every geom of a link on the
+        link origin.
+
+        Returns ``None`` when the link cannot be collapsed, so the caller keeps
+        the per-geom bodies.
+        """
+        D = self.ndim
+        if len(link_bodies) <= 1:
+            return None
+
+        Rotation = _import_rotation()
+        rots, transls = [], []
+        for body in link_bodies:
+            local_pose = np.asarray(body.local_pose, dtype=float)
+            if D == 3:
+                matrix = Rotation.from_euler("xyz", local_pose[3:]).as_matrix()
+                translation = local_pose[:3]
+            else:
+                # 2-D primitives are hand-authored in-plane stand-ins that
+                # already encode their placement within the link
+                # (``sdUnevenCapsule(side="L")`` runs from y=0 to y=-l, which
+                # is exactly a 3-D capsule rotated 90 deg about x and shifted
+                # -l/2 in y).  Re-applying the pose would double-place them,
+                # and the 2x2 block of an out-of-plane rotation is singular.
+                matrix = np.eye(2)
+                translation = np.zeros(2)
+            rots.append(torch.tensor(
+                matrix, device=self.device, dtype=self.dtype,
+            ))
+            transls.append(torch.tensor(
+                translation, device=self.device, dtype=self.dtype,
+            ))
+
+        # Union AABB: every child's own (already band-padded) box, its corners
+        # carried into the link frame.  Bail out if any child cannot bound
+        # itself, since an unbounded composite would have to be evaluated over
+        # the whole grid.
+        corner_ids = list(itertools.product((0, 1), repeat=D))
+
+        def _to_link_frame(box, rot, transl):
+            """Link-frame (lo, hi) of a child-frame box given as [lo[], hi[]]."""
+            pts = torch.stack([
+                torch.stack([box[corner[a]][a] for a in range(D)])
+                for corner in corner_ids
+            ]) @ rot.T + transl
+            return pts.min(dim=0).values, pts.max(dim=0).values
+
+        # Two boxes are needed and they are NOT interchangeable.  ``local_aabb``
+        # is padded by the BDIM band (eps + 4h) because the stencil reaches that
+        # far past the surface, which makes it useless for judging how big the
+        # geometry actually is: for a sub-cell geom the padding is the box.  The
+        # children's ``bb`` carries the raw half-extents, so the surface grid is
+        # sized and bounded from that instead.
+        band_margin = float(self.eps) + 4.0 * float(self.h)
+        pad_lo_all, pad_hi_all, raw_lo_all, raw_hi_all = [], [], [], []
+        for body, rot, transl in zip(link_bodies, rots, transls):
+            boxes = self._child_boxes(body, D, band_margin)
+            if boxes is None:
+                print(
+                    f"  Link '{link_name}' of '{sdf_path}': keeping "
+                    f"{len(link_bodies)} per-geom bodies -- geom "
+                    f"'{getattr(body, 'collision_name', None) or '?'}' does not "
+                    "bound itself (no local_aabb, bb or contour), so its union "
+                    "with its siblings cannot be bounded."
+                )
+                return None
+            (pad_box, raw_box) = boxes
+            pad_lo, pad_hi = _to_link_frame(pad_box, rot, transl)
+            raw_lo, raw_hi = _to_link_frame(raw_box, rot, transl)
+            pad_lo_all.append(pad_lo); pad_hi_all.append(pad_hi)
+            raw_lo_all.append(raw_lo); raw_hi_all.append(raw_hi)
+        lo = torch.stack(pad_lo_all).min(dim=0).values
+        hi = torch.stack(pad_hi_all).max(dim=0).values
+
+        # Marching-cubes spacing: the fluid grid cannot see a geom smaller than
+        # a cell (salamandra's eye spheres are sub-cell and yielded no surface
+        # at all), so resolve the SMALLEST child, never coarser than the flow
+        # scale, then cap total samples so a link mixing very different scales
+        # cannot blow up init.
+        child_extent = min(
+            float((child_hi - child_lo).min())
+            for child_lo, child_hi in zip(raw_lo_all, raw_hi_all)
+        )
+        surface_h = min(
+            float(self.h),
+            max(child_extent, _EPS_TINY) / _SURFACE_CELLS_PER_GEOM,
+        )
+        surface_lo = torch.stack(raw_lo_all).min(dim=0).values
+        surface_hi = torch.stack(raw_hi_all).max(dim=0).values
+        n_samples = float(torch.prod(
+            (surface_hi - surface_lo).clamp(min=0.0) / surface_h + 5.0))
+        if n_samples > _MAX_SURFACE_SAMPLES:
+            surface_h *= (n_samples / _MAX_SURFACE_SAMPLES) ** (1.0 / D)
+        # Keep the zero level set strictly interior to the surface box.
+        margin = 3.0 * surface_h
+        surface_aabb = torch.stack([surface_lo - margin, surface_hi + margin])
+
+        # A tabulated (mesh) child interpolates on its own sampled box and
+        # CLAMPS outside it, so far from the mesh it reports the box-edge
+        # distance -- a small value that would win the ``min`` and carve
+        # phantom geometry out of its siblings.  Clamp such a child to its own
+        # AABB and, outside, substitute band_margin + distance-to-AABB.  That
+        # is guaranteed not to under-report (the AABB is padded by the band, so
+        # the true distance there already exceeds band_margin), and anything
+        # beyond the band is equivalent for BDIM regardless of its exact value.
+        masks = []
+        for body in link_bodies:
+            bounds = self._child_table_bounds(body, D)
+            masks.append(None if bounds is None else (
+                bounds[0].to(device=self.device, dtype=self.dtype),
+                bounds[1].to(device=self.device, dtype=self.dtype),
+            ))
+
+        children = tuple(
+            (body.sdf, rot, transl, mask)
+            for body, rot, transl, mask in zip(
+                link_bodies, rots, transls, masks)
+        )
+
+        def _composite_sdf(*q, _children=children, _band=band_margin):
+            """min over geoms, each evaluated in its own local frame."""
+            union = None
+            n = len(_children[0][1])
+            for sdf_child, rot, transl, mask in _children:
+                delta = [q[a] - transl[a] for a in range(n)]
+                # rot.T @ (q - transl), i.e. contract along rot's columns.
+                local = tuple(
+                    sum(rot[r, c] * delta[r] for r in range(n))
+                    for c in range(n)
+                )
+                if mask is None:
+                    dist = sdf_child(*local)
+                else:
+                    lo_c, hi_c = mask
+                    clamped = tuple(
+                        local[a].clamp(float(lo_c[a]), float(hi_c[a]))
+                        for a in range(n)
+                    )
+                    outside = torch.sqrt(sum(
+                        (local[a] - clamped[a]) ** 2 for a in range(n)
+                    ))
+                    dist = torch.where(
+                        outside > 0.0,
+                        _band + outside,
+                        sdf_child(*clamped),
+                    )
+                union = dist if union is None else torch.minimum(union, dist)
+            return union
+
+        update_maps = (
+            (lambda t: (0.0,) * D if D == 3 else 0.0),
+            [
+                (lambda t, ip=initial_pose, a=a: -ip[a])
+                for a in range(D)
+            ],
+        )
+
+        def _make(contour=None, aabb=None):
+            body = BodyAnalytical(
+                self.device, self.x, self.y, _composite_sdf, update_maps,
+                z=self.z, eps=eps, plotting=False, pre_update=False,
+                local_aabb=torch.stack([lo, hi]) if aabb is None else aabb,
+                # No analytical fallback: the union of the children's own
+                # triangulations is not the union's surface.  If marching cubes
+                # finds nothing, the Lagrangian readout raises by itself.
+                triangulate=None,
+                surface_h=surface_h,
+                surface_aabb=surface_aabb,
+                contour=contour,
+            )
+            # Geom offsets are baked into the sampled union, so the composite
+            # sits at the link origin.  That is also what makes 2-D correct:
+            # the 2-D update path ignores ``local_pose`` entirely, so per-geom
+            # bodies used to collapse onto the link origin.
+            body.local_pose = np.zeros(
+                6, dtype=np.asarray(initial_pose).dtype)
+            body.name = link_name
+            body.collision_name = None
+            body.mujoco_rgba = link_bodies[0].mujoco_rgba
+            body.link_extras = link_bodies[0].link_extras
+            body.bb = [[lo[a].cpu(), hi[a].cpu()] for a in range(D)]
+            if D == 2:
+                # bb[2] is the out-of-plane thickness used by the 2-D
+                # ``force_scaling: auto`` path; keep the per-geom convention of
+                # carrying a third entry.
+                third = getattr(link_bodies[0], "bb", None)
+                body.bb.append(list(third[2]) if third is not None
+                               and len(third) > 2 else [0.0, 1.0])
+            return body
+
+        if D == 3:
+            return [_make()]
+
+        # 2-D: one body per connected loop of the union contour.  They share the
+        # union SDF, so the geometry each streams is identical; giving each a
+        # loop-tight AABB keeps them from redundantly stamping the whole link.
+        loops = self._union_contour_loops(_composite_sdf, lo, hi, surface_h)
+        if not loops:
+            return None
+        band = float(eps) + 4.0 * float(self.h)
+        bodies = []
+        for loop in loops:
+            loop_t = torch.tensor(loop, device=self.device, dtype=self.dtype)
+            loop_lo = loop_t.min(dim=1).values - band
+            loop_hi = loop_t.max(dim=1).values + band
+            bodies.append(_make(
+                contour=loop,
+                aabb=torch.stack([
+                    torch.maximum(loop_lo, lo), torch.minimum(loop_hi, hi),
+                ]),
+            ))
+        return bodies
+
+    def _union_contour_loops(self, sdf_fun, lo, hi, step):
+        """All closed loops of a 2-D union SDF, in link-local coordinates.
+
+        Sampled on a box tight to the union rather than the fluid grid, for the
+        same reason the 3-D surface is: a geom smaller than a fluid cell would
+        otherwise contribute no contour at all.
+        """
+        measure = _import_measure()
+        axes = []
+        for axis in range(2):
+            axis_lo = float(lo[axis])
+            axis_hi = float(hi[axis])
+            n_axis = max(4, int(math.ceil((axis_hi - axis_lo) / step)) + 1)
+            axes.append(axis_lo + (torch.arange(
+                n_axis, device=self.device, dtype=self.dtype) + 0.5) * step)
+        grid = torch.meshgrid(*axes, indexing="ij")
+        with torch.no_grad():
+            sdf_np = sdf_fun(*grid).cpu().numpy()
+        xnp = axes[0].cpu().numpy()
+        ynp = axes[1].cpu().numpy()
+        loops = []
+        for contour in measure.find_contours(sdf_np - float(self.h), 0):
+            pts = np.array(contour).T
+            pts[0] = xnp[0] + pts[0] * (xnp[1] - xnp[0])
+            pts[1] = ynp[0] + pts[1] * (ynp[1] - ynp[0])
+            if pts.shape[1] >= 4:
+                loops.append(pts)
+        return loops
+
     def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
                  nsamples=None, msamples=None, ksamples=None, plotting=False, plotting_meshes=False,
-                 suit=0.0, **kwargs):
+                 suit=0.0, geometry_source="collision", **kwargs):
         """Union of bodies from one or more MuJoCo/SDF model files.
 
         Mesh-based bodies that share the same mesh file (and scale) are
@@ -2554,8 +3034,34 @@ class MultiAnimatBodies(Body):
         BDIMhandler streams the per-step geometry (the rigid ``body_update``
         kernel), so neither the staggered meshgrids nor the persistent
         staggered SDF / body-velocity fields are allocated here.
+
+        ``geometry_source`` selects which SDF geometry slot is immersed, and
+        must be stated per model because the two slots are not
+        interchangeable and no default is right for every animat:
+
+        ``"collision"`` (default)
+            Immerse ``<collision>`` geometry.  Required by models that encode
+            their wetted shape there -- the 1guilla swimmer's collision
+            meshes are its visual meshes widened in y to carry the swimsuit
+            volume, so immersing its visuals would silently strip the suit.
+        ``"visual"``
+            Immerse ``<visual>`` geometry.  Right when the collision set is
+            decimated for the contact solver: salamandra_robotica's tibiae
+            collide as a bare foot sphere with no shin, and its eyes carry no
+            collision geometry at all.
+        ``"auto"``
+            Visuals when the link has any, else collisions.  Convenient, but
+            it makes the wetted shape depend on how each link happens to be
+            authored, so prefer an explicit choice.
         """
         super().__init__(device, x, y, z=z, eps=eps)
+
+        if geometry_source not in self.GEOMETRY_SOURCES:
+            raise ValueError(
+                f"geometry_source={geometry_source!r} is not one of "
+                f"{self.GEOMETRY_SOURCES}."
+            )
+        self.geometry_source = geometry_source
 
         self.suit = suit
         self.plotting        = plotting
@@ -2573,7 +3079,30 @@ class MultiAnimatBodies(Body):
             sdf_folder = os.path.dirname(animat.sdf)
             morphology_links = getattr(getattr(animat, "morphology", None), "links", None)
 
+            # ---- link identity resolution (BY NAME, never by position) ----
+            # The index stored in ``body_ids`` addresses the FARMS *sensor*
+            # link arrays (poses/velocities in BDIMhandler, ``data2xfrc`` for
+            # force application), which are ordered by
+            # ``control.sensors.links``.  That list, ``morphology.links`` and
+            # ``sdf.links`` are three independently ordered lists and the
+            # sensor list is frequently the shortest (salamandra_robotica:
+            # 14 sensors for 19 SDF links), so none of them may be zipped
+            # positionally.
+            sensor_links = getattr(
+                getattr(getattr(animat, "control", None), "sensors", None),
+                "links", None,
+            )
+            sensor_index = (
+                {str(name): idx for idx, name in enumerate(sensor_links)}
+                if sensor_links else None
+            )
+            morphology_by_name = (
+                {str(getattr(ml, "name", None)): ml for ml in morphology_links}
+                if morphology_links else {}
+            )
+
             for link_i, link in enumerate(sdf.links):
+                link_name = link["name"]
                 # ---- extract MuJoCo / SDF visual colour (RGBA) ----
                 _link_rgba = None
                 if hasattr(link, "visuals") and link.visuals:
@@ -2581,27 +3110,45 @@ class MultiAnimatBodies(Body):
                     if hasattr(_vis, "color") and _vis.color is not None:
                         _link_rgba = list(_vis.color)  # [R, G, B, A]
 
-                morphology_link = None
-                if morphology_links is not None and link_i < len(morphology_links):
-                    morphology_link = morphology_links[link_i]
+                morphology_link = morphology_by_name.get(link_name)
 
-                link_fluid_interaction = True
-                if morphology_link is not None:
-                    link_fluid_interaction = getattr(
-                        morphology_link,
-                        "fluid_interaction",
-                        link_fluid_interaction,
-                    )
+                # ``morphology.fluid_interaction`` must NOT gate immersion: it
+                # selects the links driven by FARMS' analytical drag model
+                # (farms_mujoco swimming ``drag.pyx``), which is the
+                # alternative to this CFD coupling rather than a switch on it.
+                # Configs resolved by the fluid solver set it False on every
+                # link, so honouring it here would empty the domain.
 
-                collisions = link["collisions"]
-                if not collisions:
-                    if link_fluid_interaction:
-                        raise ValueError(
-                            f"Link '{link['name']}' in '{animat.sdf}' has no collision geometry "
-                            "but morphology.fluid_interaction=True. "
-                            "Add collision geometry or disable fluid interaction for that link."
+                # Index into the FARMS sensor link arrays.  Without a sensor
+                # entry there is no pose, no velocity and no xfrc row to drive
+                # or load this link, so it cannot be coupled at all -- skip it
+                # loudly rather than borrowing a neighbour's kinematics.  Add
+                # the name to ``sensors_links`` / ``sensors_xfrc`` in the
+                # animat config to wet it (MuJoCo already builds a body and
+                # frame sensors for every SDF link).
+                if sensor_index is None:
+                    link_id = link_i  # no sensor list: legacy positional order
+                else:
+                    link_id = sensor_index.get(link_name)
+                    if link_id is None:
+                        print(
+                            f"  Skipping link '{link_name}' of '{animat.sdf}': "
+                            "not in control.sensors.links, so it has no pose / "
+                            "velocity / xfrc channel for fluid coupling."
                         )
-                    print(f"  Skipping non-fluid link without collisions: {link['name']}")
+                        continue
+
+                if self.geometry_source == "visual":
+                    geoms = link["visuals"]
+                elif self.geometry_source == "collision":
+                    geoms = link["collisions"]
+                else:  # "auto"
+                    geoms = link["visuals"] or link["collisions"]
+                if not geoms:
+                    print(
+                        f"  Skipping link '{link_name}' of '{animat.sdf}': no "
+                        f"{self.geometry_source} geometry to immerse."
+                    )
                     continue
 
                 initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
@@ -2609,7 +3156,8 @@ class MultiAnimatBodies(Body):
                 if morphology_link is not None:
                     link_extras = dict(getattr(morphology_link, "extras", {}) or {})
 
-                for collision in collisions:
+                link_bodies = []
+                for collision in geoms:
                     collision_pose = np.array(
                         collision["pose"] if "pose" in collision else np.zeros(6),
                         dtype=x.cpu().numpy().dtype,
@@ -2681,14 +3229,6 @@ class MultiAnimatBodies(Body):
                     elif "radius" in geometry and "length" in geometry:
                         radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
                         length = torch.tensor(geometry["length"], dtype=x.dtype, device=x.device)
-                        if self.ndim == 2:
-                            if "L" in link["name"]:
-                                side = "L"
-                            elif "R" in link["name"]:
-                                side = "R"
-                            else:
-                                raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
-
                         if self.ndim == 3:
                             sdf_fun = (
                                 lambda x, y, z, radius=radius, length=length:
@@ -2703,10 +3243,34 @@ class MultiAnimatBodies(Body):
                                 ],
                             )
                         else:
-                            sdf_fun = (
-                                lambda x, y, radius=radius, length=length, side=side:
-                                sdUnevenCapsule(x, y, radius, radius, length, side=side)
-                            )
+                            # 2-D cross-section of a capsule whose axis is the
+                            # geom's local z: project that axis into the plane.
+                            # A capsule seen end-on is a disc, otherwise it is a
+                            # pill of the projected length.  This replaces
+                            # deriving the side from an "L"/"R" in the link
+                            # NAME, which could not express any other
+                            # orientation and rejected links named neither.
+                            _t2, _rot3, _ = _plane_projection(collision_pose)
+                            _axis = _rot3[:, 2]
+                            _frac = float(np.hypot(_axis[0], _axis[1]))
+                            if _frac < 1e-9:
+                                sdf_fun = (
+                                    lambda x, y, radius=radius,
+                                    cx=float(_t2[0]), cy=float(_t2[1]):
+                                    circle(x, y, xt=cx, yt=cy, r=radius)
+                                )
+                            else:
+                                _dir = np.array(_axis[:2]) / _frac
+                                _half = 0.5 * float(length.item()) * _frac * _dir
+                                _end_a = torch.tensor(
+                                    _t2 - _half, dtype=x.dtype, device=x.device)
+                                _end_b = torch.tensor(
+                                    _t2 + _half, dtype=x.dtype, device=x.device)
+                                sdf_fun = (
+                                    lambda x, y, A=_end_a, B=_end_b,
+                                    radius=radius:
+                                    segment(x, y, A, B, radius, radius)
+                                )
                             update_maps = (
                                 lambda t: 0,
                                 [
@@ -2738,21 +3302,19 @@ class MultiAnimatBodies(Body):
                             # MuJoCo are approximated as capsules.)
                             _triangulate = lambda r=_r, hl=0.5*_l: _triangulate_capsule(r, hl)
                         else:
-                            # 2-D sdUnevenCapsule(x, y, r, r, l, side):
-                            #   side="L": pill runs along -y, from y=0 to y=-l
-                            #   side="R": pill runs along +y, from y=0 to y=+l
-                            if side == "L":
-                                _local_aabb = torch.tensor(
-                                    [[-_r - _bm, -(_l + _r) - _bm],
-                                     [ _r + _bm,          _r + _bm]],
-                                    dtype=x.dtype, device=x.device,
-                                )
-                            else:  # side == "R"
-                                _local_aabb = torch.tensor(
-                                    [[-_r - _bm,        -_r - _bm],
-                                     [ _r + _bm, (_l + _r) + _bm]],
-                                    dtype=x.dtype, device=x.device,
-                                )
+                            # Footprint of the projected pill (or disc), which
+                            # already carries the geom's in-plane placement.
+                            if _frac < 1e-9:
+                                _foot_lo = _t2 - _r
+                                _foot_hi = _t2 + _r
+                            else:
+                                _foot_lo = np.minimum(_t2 - _half, _t2 + _half) - _r
+                                _foot_hi = np.maximum(_t2 - _half, _t2 + _half) + _r
+                            _local_aabb = torch.tensor(
+                                [(_foot_lo - _bm).tolist(),
+                                 (_foot_hi + _bm).tolist()],
+                                dtype=x.dtype, device=x.device,
+                            )
                             _triangulate = None  # 2-D uses contours, not triangles
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
@@ -2767,6 +3329,14 @@ class MultiAnimatBodies(Body):
                             [-radius_cpu, radius_cpu],
                             [-(0.5 * length_cpu + radius_cpu), 0.5 * length_cpu + radius_cpu],
                         ]
+                        if self.ndim == 2:
+                            # In-plane entries describe the PROJECTED footprint
+                            # (placement included) so the composite can size and
+                            # bound itself; the third entry stays the geom's own
+                            # out-of-plane extent, which drives
+                            # ``force_scaling: auto``.
+                            body.bb[0] = [_foot_lo[0], _foot_hi[0]]
+                            body.bb[1] = [_foot_lo[1], _foot_hi[1]]
 
                     elif "radius" in geometry and "length" not in geometry:
                         radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
@@ -2784,9 +3354,13 @@ class MultiAnimatBodies(Body):
                                 ],
                             )
                         else:
+                            # A sphere's cross-section is a disc at the geom's
+                            # in-plane offset; its rotation is irrelevant.
+                            _t2, _, _ = _plane_projection(collision_pose)
                             sdf_fun = (
-                                lambda x, y, radius=radius:
-                                circle(x, y, xt=0, yt=0, r=radius)
+                                lambda x, y, radius=radius,
+                                cx=float(_t2[0]), cy=float(_t2[1]):
+                                circle(x, y, xt=cx, yt=cy, r=radius)
                             )
                             update_maps = (
                                 lambda t: 0,
@@ -2811,8 +3385,8 @@ class MultiAnimatBodies(Body):
                             _triangulate = lambda r=_r: _triangulate_sphere(r)
                         else:
                             _local_aabb = torch.tensor(
-                                [[-_r - _bm, -_r - _bm],
-                                 [ _r + _bm,  _r + _bm]],
+                                [[_t2[0] - _r - _bm, _t2[1] - _r - _bm],
+                                 [_t2[0] + _r + _bm, _t2[1] + _r + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
                             _triangulate = None
@@ -2828,6 +3402,9 @@ class MultiAnimatBodies(Body):
                             [-radius_cpu, radius_cpu],
                             [-radius_cpu, radius_cpu],
                         ]
+                        if self.ndim == 2:
+                            body.bb[0] = [_t2[0] - _r, _t2[0] + _r]
+                            body.bb[1] = [_t2[1] - _r, _t2[1] + _r]
 
                     elif "size" in geometry:
                         size = torch.tensor(geometry["size"], dtype=x.dtype, device=x.device)
@@ -2850,13 +3427,37 @@ class MultiAnimatBodies(Body):
                                 ],
                             )
                         else:
-                            sdf_fun = (
-                                lambda x, y, half_size=half_size: box(
-                                    x, y,
-                                    xb=half_size[0],
-                                    yb=half_size[1],
+                            # 2-D cross-section of the box at its in-plane
+                            # offset.  When the pose keeps the xy plane the 2x2
+                            # block is a genuine rotation, so the section is the
+                            # rectangle turned by it; otherwise the box is
+                            # tilted out of plane and the section is taken as
+                            # its projected extents (exact for the axis-swapping
+                            # 90 deg poses that SDF models actually use).
+                            _t2, _rot3, _in_plane = _plane_projection(collision_pose)
+                            _hs_all = half_size.detach().cpu().numpy()
+                            if _in_plane is not None:
+                                _hx, _hy = float(_hs_all[0]), float(_hs_all[1])
+                                _m = torch.tensor(
+                                    _in_plane, dtype=x.dtype, device=x.device)
+                                sdf_fun = (
+                                    lambda x, y, M=_m, hx=_hx, hy=_hy,
+                                    cx=float(_t2[0]), cy=float(_t2[1]): box(
+                                        M[0, 0] * (x - cx) + M[1, 0] * (y - cy),
+                                        M[0, 1] * (x - cx) + M[1, 1] * (y - cy),
+                                        xb=hx, yb=hy,
+                                    )
                                 )
-                            )
+                                _abs_m = np.abs(_in_plane)
+                                _half_xy = _abs_m @ np.array([_hx, _hy])
+                            else:
+                                _half_xy = np.abs(_rot3[:2, :]) @ _hs_all
+                                sdf_fun = (
+                                    lambda x, y, hx=float(_half_xy[0]),
+                                    hy=float(_half_xy[1]),
+                                    cx=float(_t2[0]), cy=float(_t2[1]):
+                                    box(x - cx, y - cy, xb=hx, yb=hy)
+                                )
                             update_maps = (
                                 lambda t: 0,
                                 [
@@ -2879,8 +3480,10 @@ class MultiAnimatBodies(Body):
                             _triangulate = lambda h=_hs: _triangulate_box(h[0], h[1], h[2])
                         else:
                             _local_aabb = torch.tensor(
-                                [[-_hs[0] - _bm, -_hs[1] - _bm],
-                                 [ _hs[0] + _bm,  _hs[1] + _bm]],
+                                [[_t2[0] - _half_xy[0] - _bm,
+                                  _t2[1] - _half_xy[1] - _bm],
+                                 [_t2[0] + _half_xy[0] + _bm,
+                                  _t2[1] + _half_xy[1] + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
                             _triangulate = None
@@ -2895,17 +3498,42 @@ class MultiAnimatBodies(Body):
                             [-half_size[1].cpu(), half_size[1].cpu()],
                             [-half_size[2].cpu(), half_size[2].cpu()],
                         ]
+                        if self.ndim == 2:
+                            body.bb[0] = [_t2[0] - _half_xy[0],
+                                          _t2[0] + _half_xy[0]]
+                            body.bb[1] = [_t2[1] - _half_xy[1],
+                                          _t2[1] + _half_xy[1]]
 
                     else:
-                        raise ValueError("Unsupported geometry type in SDF.")
+                        raise ValueError(
+                            f"Unsupported geometry type "
+                            f"{type(geometry).__name__!r} on "
+                            f"'{collision['name'] if 'name' in collision else '?'}' "
+                            f"of link '{link_name}' in '{animat.sdf}'. Supported: "
+                            "mesh (uri), box (size), sphere (radius), "
+                            "cylinder / capsule (radius + length)."
+                        )
 
-                    body.mujoco_rgba = _link_rgba
+                    # Per-geom colour when the geom carries one (visuals do,
+                    # collisions do not), else the link's first visual colour.
+                    _geom_rgba = getattr(collision, "color", None)
+                    body.mujoco_rgba = (
+                        list(_geom_rgba) if _geom_rgba is not None else _link_rgba
+                    )
                     body.local_pose = collision_pose
-                    body.name = link["name"]
+                    body.name = link_name
                     body.collision_name = collision["name"] if "name" in collision else None
                     body.link_extras = link_extras
+                    link_bodies.append(body)
+
+                # One fluid body per link where the geometry allows it; the
+                # coupling boundary sums per link either way, so a link that
+                # cannot be collapsed still behaves correctly.
+                for body in (self._link_composite_body(
+                        link_bodies, link_name, animat.sdf, initial_pose, eps)
+                        or link_bodies):
                     self.bodies.append(body)
-                    self.body_ids.append([animat_i, link_i])
+                    self.body_ids.append([animat_i, link_id])
 
         self.nbodies = len(self.bodies)
         gs = self.grid_shape

@@ -251,17 +251,44 @@ class FarmsMujocoBackend(RigidBodyBackend):
         physics = self._physics
         units_N = task.units.newtons
 
+        # A link may own SEVERAL fluid bodies (one per collision/visual geom,
+        # and in 2-D one per contour loop of the union), all resolving to the
+        # same engine body.  Their hydrodynamic loads must be SUMMED: writing
+        # them one at a time let each body overwrite the previous one, so only
+        # the last geom's force reached MuJoCo.
+        #
+        # Buoyancy is NOT summed.  ``_buoy_mass`` is the whole engine body's
+        # mass, so ``buoyancy[body_i]`` is identical for every body sharing a
+        # link; adding it per body would scale a 4-geom link's buoyancy by 4.
+        # It is therefore taken once per target.
+        #
+        # The accumulate-then-write split also preserves the clear-on-write
+        # behaviour this method relies on: nothing else zeroes
+        # ``xfrc_applied``, so the final assignment (not ``+=``) is what stops
+        # stale loads from integrating across substeps.
+        lin_acc: dict[int, np.ndarray] = {}
+        ang_acc: dict[int, np.ndarray] = {}
+        buoy_acc: dict[int, float] = {}
         for body_i, (animat_id, link_id) in enumerate(body_ids):
-            ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
+            ind = int(task.maps[animat_id]["sensors"]["data2xfrc"][link_id])
+            if ind not in lin_acc:
+                lin_acc[ind] = np.zeros(len(lin_xfrc_idx), dtype=self.dtype_np)
+                ang_acc[ind] = np.zeros(len(ang_xfrc_idx), dtype=self.dtype_np)
+                buoy_acc[ind] = float(buoyancy[body_i])
+            for d in range(len(lin_xfrc_idx)):
+                lin_acc[ind][d] += lin_total[d][body_i]
+            for d in range(len(ang_xfrc_idx)):
+                ang_acc[ind][d] += ang_total[d][body_i]
 
+        for ind, lin_vals in lin_acc.items():
             for d, xidx in enumerate(lin_xfrc_idx):
-                val = lin_total[d][body_i] * units_N
+                val = lin_vals[d] * units_N
                 if xidx == buoy_xidx:
-                    val += buoyancy[body_i] * units_N
+                    val += buoy_acc[ind] * units_N
                 physics.data.xfrc_applied[ind, xidx] = val
 
             for d, xidx in enumerate(ang_xfrc_idx):
-                physics.data.xfrc_applied[ind, xidx] = ang_total[d][body_i] * units_N
+                physics.data.xfrc_applied[ind, xidx] = ang_acc[ind][d] * units_N
 
     # -- implicit-coupling stepping --------------------------------------
     def checkpoint(self):

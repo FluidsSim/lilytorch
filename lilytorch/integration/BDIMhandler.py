@@ -627,19 +627,52 @@ class BDIMhandler:
             mass, max_rbound = self._backend.get_body_mass_radius(animat_id, link_id)
             self._buoy_mass[body_i] = mass
             if experiment_options is not None:
-                try:
-                    density = float(
-                        experiment_options.animats[animat_id]
-                        .morphology.links[link_id].density
-                    )
-                except Exception:
-                    density = float(self.fluid_solver.rho)
-                if density > 0.0:
+                # Look the density up BY LINK NAME.  ``link_id`` indexes the
+                # sensor arrays, which are ordered independently of (and are
+                # often shorter than) ``morphology.links``; the previous
+                # positional lookup wrapped in a bare ``except Exception``
+                # silently substituted the FLUID density for every link past
+                # the end of the list -- e.g. the salamandra tail and tibias
+                # were buoyed at 1000 kg/m3 instead of the configured 800.
+                link_name = getattr(comp.bodies[body_i], "name", None)
+                density = self._link_density(
+                    experiment_options, animat_id, link_name)
+                if density is not None and density > 0.0:
                     self._buoy_density[body_i] = density
 
             self._buoy_height[body_i] = 0.5 * max_rbound
 
         self._buoyancy_initialized = True
+
+    def _link_density(self, experiment_options, animat_id, link_name):
+        """Configured density [kg/m^3] of one link, resolved by NAME.
+
+        Returns ``None`` (and warns once per link) when the animat config
+        carries no entry for the link, so the caller falls back to the fluid
+        density -- neutral buoyancy -- with the substitution visible instead
+        of swallowed.
+        """
+        links = getattr(
+            getattr(experiment_options.animats[animat_id], "morphology", None),
+            "links", None,
+        )
+        if links:
+            for morphology_link in links:
+                if str(getattr(morphology_link, "name", None)) == str(link_name):
+                    density = getattr(morphology_link, "density", None)
+                    if density is not None:
+                        return float(density)
+                    break
+        warned = self.__dict__.setdefault("_density_warned", set())
+        if (animat_id, link_name) not in warned:
+            warned.add((animat_id, link_name))
+            print(
+                f"[BDIMhandler] no morphology density for link "
+                f"'{link_name}' (animat {animat_id}); buoying it at the fluid "
+                f"density {float(self.fluid_solver.rho)} kg/m3 (neutral). Add "
+                "the link to morphology.links to set its density."
+            )
+        return None
 
     # ==================================================================
     #  update: FARMS kinematics  ->  SDF fields + body velocities
@@ -905,7 +938,9 @@ class BDIMhandler:
         for b, body in enumerate(comp.bodies):
             m = body._stream_meta
             if D == 3:
-                # Compose with the body's local collision pose (mesh links).
+                # Compose with the geom's own pose within the link.  3-D SDF
+                # primitives are all authored at the origin, so the pose is
+                # what places them.
                 lp = getattr(body, 'local_pose', None)
                 if lp is not None:
                     lp_t = torch.as_tensor(
@@ -921,9 +956,17 @@ class BDIMhandler:
                 sdf_lo[b] = torch.stack((sx[0], sy[0], sz[0]))
                 sdf_hi[b] = torch.stack((sx[-1], sy[-1], sz[-1]))
             else:
-                # 2-D rigid-body links have identity local frames (lt=0, lr=I,
-                # set above).  Prefer the tight contour-based AABB for mesh
-                # bodies whose SDF table is padded far beyond the BDIM band.
+                # 2-D local frames stay identity ON PURPOSE.  A 2-D primitive
+                # is a hand-authored in-plane stand-in that already encodes its
+                # placement within the link -- ``sdUnevenCapsule(side="L")``
+                # runs from y=0 to y=-l, exactly reproducing a 3-D capsule
+                # whose pose is a 90 deg x-rotation plus a -l/2 y-offset.
+                # Applying that pose again would both double-place it and, as
+                # the 2x2 block of an out-of-plane rotation is SINGULAR
+                # (det=0), collapse the body frame's y axis.
+                #
+                # Prefer the tight contour-based AABB for mesh bodies whose
+                # SDF table is padded far beyond the BDIM band.
                 if 'local_aabb_lo' in m:
                     sdf_lo[b] = m['local_aabb_lo'].to(
                         dtype=self.dtype, device=self.device)
@@ -951,9 +994,10 @@ class BDIMhandler:
             'inv_h':        1.0 / float(comp.h),
             'gs':           torch.tensor(gs, dtype=torch.int64, device=self.device),
             'pad':          8,
-            # numpy mirrors used by the host-side per-step assembly.  2-D
-            # stores zeros/identity for local_lt/lr so the unified compose
-            # einsum is a bit-exact no-op there (R@I = R, urdf + R@0 = urdf).
+            # numpy mirrors used by the host-side per-step assembly.  Both
+            # dimensions carry a real local_lt/lr; a geom with no pose keeps
+            # zeros/identity, for which the compose einsum is a bit-exact
+            # no-op (R@I = R, urdf + R@0 = urdf).
             'body_ids_np':     body_ids.numpy(),
             'local_lt_np':     local_lt.detach().cpu().numpy().copy(),
             'local_lr_np':     local_lr.detach().cpu().numpy().copy(),
@@ -1103,10 +1147,16 @@ class BDIMhandler:
     #  Python body-update helpers  (ported back from cuda_kernels)
     # ==================================================================
 
-    def _compose_body_frame_3d(self, body, urdf_pos, R):
-        """Compose the MuJoCo link pose with the body's local collision pose."""
+    def _compose_body_frame(self, body, urdf_pos, R):
+        """Compose the link pose with the geom's own pose within the link.
+
+        3-D only.  2-D primitives are hand-authored in-plane stand-ins that
+        already encode their placement within the link, and the 2x2 block of an
+        out-of-plane rotation is singular, so 2-D keeps an identity local frame
+        (see the note in :meth:`_stream_kin_static`).
+        """
         local_pose = getattr(body, "local_pose", None)
-        if local_pose is None:
+        if local_pose is None or self.ndim != 3:
             return urdf_pos, R
 
         local_translation = getattr(body, "_local_translation_t", None)
@@ -1117,7 +1167,8 @@ class BDIMhandler:
                 local_pose_np[:3], device=self.device, dtype=self.dtype,
             )
             local_rotation = torch.tensor(
-                Rotation.from_euler("xyz", local_pose_np[3:]).as_matrix().astype(self.dtype_np),
+                Rotation.from_euler("xyz", local_pose_np[3:])
+                .as_matrix().astype(self.dtype_np),
                 device=self.device, dtype=self.dtype,
             )
             body._local_translation_t = local_translation
@@ -1280,18 +1331,15 @@ class BDIMhandler:
             ang_vel  = ang_vels_t[animat_id][link_id]
 
             # ── Body frame + AABB descriptor ────────────────────────
-            # 2-D rigid-body links collapse to identity local frames, so
-            # body_pos = urdf_pos, body_rot = R.  3-D composes the MuJoCo
-            # link pose with the body's local collision pose.
+            # Both dimensions compose the link pose with the geom's own pose
+            # within the link; only the AABB helper differs.
+            body_pos, body_rot = self._compose_body_frame(body, urdf_pos, R)
             if D == 2:
-                body_pos, body_rot = urdf_pos, R
                 aabb = BDIMhandler._body_aabb_local_2d(
                     body, body_rot, body_pos,
                     comp.x, comp.y, h_grid, gs, pad=3,
                 )
             else:
-                body_pos, body_rot = self._compose_body_frame_3d(
-                    body, urdf_pos, R)
                 aabb = BDIMhandler._body_aabb_indices(
                     body, body_rot, body_pos,
                     comp.x, comp.y, comp.z, h_grid, gs, pad=3,
