@@ -2771,15 +2771,23 @@ class MultiAnimatBodies(Body):
         rots, transls = [], []
         for body in link_bodies:
             local_pose = np.asarray(body.local_pose, dtype=float)
-            matrix = Rotation.from_euler("xyz", local_pose[3:]).as_matrix()
-            # 2-D keeps the in-plane block: an out-of-plane tilt has no
-            # meaningful 2-D cross-section, and the per-geom path it replaces
-            # discarded the whole pose anyway.
+            if D == 3:
+                matrix = Rotation.from_euler("xyz", local_pose[3:]).as_matrix()
+                translation = local_pose[:3]
+            else:
+                # 2-D primitives are hand-authored in-plane stand-ins that
+                # already encode their placement within the link
+                # (``sdUnevenCapsule(side="L")`` runs from y=0 to y=-l, which
+                # is exactly a 3-D capsule rotated 90 deg about x and shifted
+                # -l/2 in y).  Re-applying the pose would double-place them,
+                # and the 2x2 block of an out-of-plane rotation is singular.
+                matrix = np.eye(2)
+                translation = np.zeros(2)
             rots.append(torch.tensor(
-                matrix[:D, :D], device=self.device, dtype=self.dtype,
+                matrix, device=self.device, dtype=self.dtype,
             ))
             transls.append(torch.tensor(
-                local_pose[:D], device=self.device, dtype=self.dtype,
+                translation, device=self.device, dtype=self.dtype,
             ))
 
         # Union AABB: every child's own (already band-padded) box, its corners

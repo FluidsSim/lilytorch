@@ -937,30 +937,34 @@ class BDIMhandler:
 
         for b, body in enumerate(comp.bodies):
             m = body._stream_meta
-            # Compose with the geom's own pose within the link, in BOTH
-            # dimensions.  A geom's <pose> is relative to the link frame, so
-            # skipping this puts the geom on the link origin: 8 of
-            # salamander_v5's 17 collision geoms carry in-plane offsets of up
-            # to 3 mm on ~20 mm links.  The per-step assembly composes
-            # ``local_lt``/``local_lr`` dimension-agnostically already, so only
-            # populating them was ever 3-D specific.  2-D takes the in-plane
-            # block: an out-of-plane tilt has no 2-D cross-section.
-            lp = getattr(body, 'local_pose', None)
-            if lp is not None:
-                lp_t = torch.as_tensor(
-                    lp, dtype=self.dtype, device=self.device)
-                local_lt[b] = lp_t[:D]
-                local_lr[b] = torch.as_tensor(
-                    Rotation.from_euler(
-                        'xyz', lp_t[3:].detach().cpu().numpy(),
-                    ).as_matrix()[:D, :D],
-                    dtype=self.dtype, device=self.device,
-                )
             if D == 3:
+                # Compose with the geom's own pose within the link.  3-D SDF
+                # primitives are all authored at the origin, so the pose is
+                # what places them.
+                lp = getattr(body, 'local_pose', None)
+                if lp is not None:
+                    lp_t = torch.as_tensor(
+                        lp, dtype=self.dtype, device=self.device)
+                    local_lt[b] = lp_t[:3]
+                    local_lr[b] = torch.as_tensor(
+                        Rotation.from_euler(
+                            'xyz', lp_t[3:].detach().cpu().numpy(),
+                        ).as_matrix(),
+                        dtype=self.dtype, device=self.device,
+                    )
                 sx, sy, sz = m['bx'], m['by'], m['bz']
                 sdf_lo[b] = torch.stack((sx[0], sy[0], sz[0]))
                 sdf_hi[b] = torch.stack((sx[-1], sy[-1], sz[-1]))
             else:
+                # 2-D local frames stay identity ON PURPOSE.  A 2-D primitive
+                # is a hand-authored in-plane stand-in that already encodes its
+                # placement within the link -- ``sdUnevenCapsule(side="L")``
+                # runs from y=0 to y=-l, exactly reproducing a 3-D capsule
+                # whose pose is a 90 deg x-rotation plus a -l/2 y-offset.
+                # Applying that pose again would both double-place it and, as
+                # the 2x2 block of an out-of-plane rotation is SINGULAR
+                # (det=0), collapse the body frame's y axis.
+                #
                 # Prefer the tight contour-based AABB for mesh bodies whose
                 # SDF table is padded far beyond the BDIM band.
                 if 'local_aabb_lo' in m:
@@ -1146,25 +1150,25 @@ class BDIMhandler:
     def _compose_body_frame(self, body, urdf_pos, R):
         """Compose the link pose with the geom's own pose within the link.
 
-        Dimension-agnostic: a geom's ``<pose>`` is given relative to the link
-        frame in both 2-D and 3-D, so both must apply it.  2-D uses the
-        in-plane block, an out-of-plane tilt having no 2-D cross-section.
+        3-D only.  2-D primitives are hand-authored in-plane stand-ins that
+        already encode their placement within the link, and the 2x2 block of an
+        out-of-plane rotation is singular, so 2-D keeps an identity local frame
+        (see the note in :meth:`_stream_kin_static`).
         """
         local_pose = getattr(body, "local_pose", None)
-        if local_pose is None:
+        if local_pose is None or self.ndim != 3:
             return urdf_pos, R
-        D = self.ndim
 
         local_translation = getattr(body, "_local_translation_t", None)
         local_rotation = getattr(body, "_local_rotation_t", None)
         if local_translation is None or local_rotation is None:
             local_pose_np = np.asarray(local_pose, dtype=self.dtype_np)
             local_translation = torch.tensor(
-                local_pose_np[:D], device=self.device, dtype=self.dtype,
+                local_pose_np[:3], device=self.device, dtype=self.dtype,
             )
             local_rotation = torch.tensor(
                 Rotation.from_euler("xyz", local_pose_np[3:])
-                .as_matrix().astype(self.dtype_np)[:D, :D],
+                .as_matrix().astype(self.dtype_np),
                 device=self.device, dtype=self.dtype,
             )
             body._local_translation_t = local_translation
