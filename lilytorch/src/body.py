@@ -47,6 +47,28 @@ def _import_rotation():
     from scipy.spatial.transform import Rotation
     return Rotation
 
+def _plane_projection(collision_pose):
+    """Project a geom's pose onto the 2-D xy plane.
+
+    Returns ``(centre_xy, rot3, in_plane_rot)``:
+
+    ``centre_xy``    the geom's in-plane translation;
+    ``rot3``         its full 3x3 rotation;
+    ``in_plane_rot`` the 2x2 in-plane rotation when the pose maps the xy plane
+                     to itself, else ``None``.
+
+    A 2-D run needs the geom's CROSS-SECTION, which is a projection, not a
+    slice of the rotation: for an out-of-plane tilt the 2x2 block of ``rot3``
+    is singular (``R_x(90 deg)[:2,:2]`` has determinant 0) and is not a
+    rotation at all.  Callers therefore project each shape's defining
+    direction, and only use ``in_plane_rot`` when the plane is preserved.
+    """
+    pose = np.asarray(collision_pose, dtype=float)
+    rot3 = _import_rotation().from_euler("xyz", pose[3:]).as_matrix()
+    in_plane_rot = rot3[:2, :2] if abs(rot3[2, 2]) > 1.0 - 1e-9 else None
+    return pose[:2], rot3, in_plane_rot
+
+
 def _pick_contour(contours, body_label):
     """Pick the contour a 2-D body will use, reporting anything discarded.
 
@@ -3207,14 +3229,6 @@ class MultiAnimatBodies(Body):
                     elif "radius" in geometry and "length" in geometry:
                         radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
                         length = torch.tensor(geometry["length"], dtype=x.dtype, device=x.device)
-                        if self.ndim == 2:
-                            if "L" in link["name"]:
-                                side = "L"
-                            elif "R" in link["name"]:
-                                side = "R"
-                            else:
-                                raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
-
                         if self.ndim == 3:
                             sdf_fun = (
                                 lambda x, y, z, radius=radius, length=length:
@@ -3229,10 +3243,34 @@ class MultiAnimatBodies(Body):
                                 ],
                             )
                         else:
-                            sdf_fun = (
-                                lambda x, y, radius=radius, length=length, side=side:
-                                sdUnevenCapsule(x, y, radius, radius, length, side=side)
-                            )
+                            # 2-D cross-section of a capsule whose axis is the
+                            # geom's local z: project that axis into the plane.
+                            # A capsule seen end-on is a disc, otherwise it is a
+                            # pill of the projected length.  This replaces
+                            # deriving the side from an "L"/"R" in the link
+                            # NAME, which could not express any other
+                            # orientation and rejected links named neither.
+                            _t2, _rot3, _ = _plane_projection(collision_pose)
+                            _axis = _rot3[:, 2]
+                            _frac = float(np.hypot(_axis[0], _axis[1]))
+                            if _frac < 1e-9:
+                                sdf_fun = (
+                                    lambda x, y, radius=radius,
+                                    cx=float(_t2[0]), cy=float(_t2[1]):
+                                    circle(x, y, xt=cx, yt=cy, r=radius)
+                                )
+                            else:
+                                _dir = np.array(_axis[:2]) / _frac
+                                _half = 0.5 * float(length.item()) * _frac * _dir
+                                _end_a = torch.tensor(
+                                    _t2 - _half, dtype=x.dtype, device=x.device)
+                                _end_b = torch.tensor(
+                                    _t2 + _half, dtype=x.dtype, device=x.device)
+                                sdf_fun = (
+                                    lambda x, y, A=_end_a, B=_end_b,
+                                    radius=radius:
+                                    segment(x, y, A, B, radius, radius)
+                                )
                             update_maps = (
                                 lambda t: 0,
                                 [
@@ -3264,21 +3302,19 @@ class MultiAnimatBodies(Body):
                             # MuJoCo are approximated as capsules.)
                             _triangulate = lambda r=_r, hl=0.5*_l: _triangulate_capsule(r, hl)
                         else:
-                            # 2-D sdUnevenCapsule(x, y, r, r, l, side):
-                            #   side="L": pill runs along -y, from y=0 to y=-l
-                            #   side="R": pill runs along +y, from y=0 to y=+l
-                            if side == "L":
-                                _local_aabb = torch.tensor(
-                                    [[-_r - _bm, -(_l + _r) - _bm],
-                                     [ _r + _bm,          _r + _bm]],
-                                    dtype=x.dtype, device=x.device,
-                                )
-                            else:  # side == "R"
-                                _local_aabb = torch.tensor(
-                                    [[-_r - _bm,        -_r - _bm],
-                                     [ _r + _bm, (_l + _r) + _bm]],
-                                    dtype=x.dtype, device=x.device,
-                                )
+                            # Footprint of the projected pill (or disc), which
+                            # already carries the geom's in-plane placement.
+                            if _frac < 1e-9:
+                                _foot_lo = _t2 - _r
+                                _foot_hi = _t2 + _r
+                            else:
+                                _foot_lo = np.minimum(_t2 - _half, _t2 + _half) - _r
+                                _foot_hi = np.maximum(_t2 - _half, _t2 + _half) + _r
+                            _local_aabb = torch.tensor(
+                                [(_foot_lo - _bm).tolist(),
+                                 (_foot_hi + _bm).tolist()],
+                                dtype=x.dtype, device=x.device,
+                            )
                             _triangulate = None  # 2-D uses contours, not triangles
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
@@ -3293,6 +3329,14 @@ class MultiAnimatBodies(Body):
                             [-radius_cpu, radius_cpu],
                             [-(0.5 * length_cpu + radius_cpu), 0.5 * length_cpu + radius_cpu],
                         ]
+                        if self.ndim == 2:
+                            # In-plane entries describe the PROJECTED footprint
+                            # (placement included) so the composite can size and
+                            # bound itself; the third entry stays the geom's own
+                            # out-of-plane extent, which drives
+                            # ``force_scaling: auto``.
+                            body.bb[0] = [_foot_lo[0], _foot_hi[0]]
+                            body.bb[1] = [_foot_lo[1], _foot_hi[1]]
 
                     elif "radius" in geometry and "length" not in geometry:
                         radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
@@ -3310,9 +3354,13 @@ class MultiAnimatBodies(Body):
                                 ],
                             )
                         else:
+                            # A sphere's cross-section is a disc at the geom's
+                            # in-plane offset; its rotation is irrelevant.
+                            _t2, _, _ = _plane_projection(collision_pose)
                             sdf_fun = (
-                                lambda x, y, radius=radius:
-                                circle(x, y, xt=0, yt=0, r=radius)
+                                lambda x, y, radius=radius,
+                                cx=float(_t2[0]), cy=float(_t2[1]):
+                                circle(x, y, xt=cx, yt=cy, r=radius)
                             )
                             update_maps = (
                                 lambda t: 0,
@@ -3337,8 +3385,8 @@ class MultiAnimatBodies(Body):
                             _triangulate = lambda r=_r: _triangulate_sphere(r)
                         else:
                             _local_aabb = torch.tensor(
-                                [[-_r - _bm, -_r - _bm],
-                                 [ _r + _bm,  _r + _bm]],
+                                [[_t2[0] - _r - _bm, _t2[1] - _r - _bm],
+                                 [_t2[0] + _r + _bm, _t2[1] + _r + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
                             _triangulate = None
@@ -3354,6 +3402,9 @@ class MultiAnimatBodies(Body):
                             [-radius_cpu, radius_cpu],
                             [-radius_cpu, radius_cpu],
                         ]
+                        if self.ndim == 2:
+                            body.bb[0] = [_t2[0] - _r, _t2[0] + _r]
+                            body.bb[1] = [_t2[1] - _r, _t2[1] + _r]
 
                     elif "size" in geometry:
                         size = torch.tensor(geometry["size"], dtype=x.dtype, device=x.device)
@@ -3376,13 +3427,37 @@ class MultiAnimatBodies(Body):
                                 ],
                             )
                         else:
-                            sdf_fun = (
-                                lambda x, y, half_size=half_size: box(
-                                    x, y,
-                                    xb=half_size[0],
-                                    yb=half_size[1],
+                            # 2-D cross-section of the box at its in-plane
+                            # offset.  When the pose keeps the xy plane the 2x2
+                            # block is a genuine rotation, so the section is the
+                            # rectangle turned by it; otherwise the box is
+                            # tilted out of plane and the section is taken as
+                            # its projected extents (exact for the axis-swapping
+                            # 90 deg poses that SDF models actually use).
+                            _t2, _rot3, _in_plane = _plane_projection(collision_pose)
+                            _hs_all = half_size.detach().cpu().numpy()
+                            if _in_plane is not None:
+                                _hx, _hy = float(_hs_all[0]), float(_hs_all[1])
+                                _m = torch.tensor(
+                                    _in_plane, dtype=x.dtype, device=x.device)
+                                sdf_fun = (
+                                    lambda x, y, M=_m, hx=_hx, hy=_hy,
+                                    cx=float(_t2[0]), cy=float(_t2[1]): box(
+                                        M[0, 0] * (x - cx) + M[1, 0] * (y - cy),
+                                        M[0, 1] * (x - cx) + M[1, 1] * (y - cy),
+                                        xb=hx, yb=hy,
+                                    )
                                 )
-                            )
+                                _abs_m = np.abs(_in_plane)
+                                _half_xy = _abs_m @ np.array([_hx, _hy])
+                            else:
+                                _half_xy = np.abs(_rot3[:2, :]) @ _hs_all
+                                sdf_fun = (
+                                    lambda x, y, hx=float(_half_xy[0]),
+                                    hy=float(_half_xy[1]),
+                                    cx=float(_t2[0]), cy=float(_t2[1]):
+                                    box(x - cx, y - cy, xb=hx, yb=hy)
+                                )
                             update_maps = (
                                 lambda t: 0,
                                 [
@@ -3405,8 +3480,10 @@ class MultiAnimatBodies(Body):
                             _triangulate = lambda h=_hs: _triangulate_box(h[0], h[1], h[2])
                         else:
                             _local_aabb = torch.tensor(
-                                [[-_hs[0] - _bm, -_hs[1] - _bm],
-                                 [ _hs[0] + _bm,  _hs[1] + _bm]],
+                                [[_t2[0] - _half_xy[0] - _bm,
+                                  _t2[1] - _half_xy[1] - _bm],
+                                 [_t2[0] + _half_xy[0] + _bm,
+                                  _t2[1] + _half_xy[1] + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
                             _triangulate = None
@@ -3421,6 +3498,11 @@ class MultiAnimatBodies(Body):
                             [-half_size[1].cpu(), half_size[1].cpu()],
                             [-half_size[2].cpu(), half_size[2].cpu()],
                         ]
+                        if self.ndim == 2:
+                            body.bb[0] = [_t2[0] - _half_xy[0],
+                                          _t2[0] + _half_xy[0]]
+                            body.bb[1] = [_t2[1] - _half_xy[1],
+                                          _t2[1] + _half_xy[1]]
 
                     else:
                         raise ValueError(
