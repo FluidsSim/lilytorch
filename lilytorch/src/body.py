@@ -2655,18 +2655,26 @@ class MultiAnimatBodies(Body):
 
         Both are ``[lo[], hi[]]`` lists of scalars.  The padded box is what the
         BDIM band needs; the raw box is the geometry's true extent and is what
-        the surface resolution must be judged against.  Sources differ by body
-        type -- analytical geoms carry ``local_aabb``/``bb``, mesh geoms carry
-        only ``bb`` and a contour -- so both are derived here rather than
-        assumed.  Returns ``None`` if the geom cannot bound itself.
+        the surface resolution must be judged against -- the two are NOT
+        interchangeable, since for a sub-cell geom the padding is the whole box.
+
+        Follows the same source priority as ``BDIMhandler._body_local_aabb_2d``
+        / ``_body_local_aabb_3d``, because body types advertise their bounds
+        differently by design: ``BodyAnalytical`` derives ``local_aabb`` during
+        init, whereas a mesh body's local box IS its SDF table's axis range
+        (``sdf.x/y/z``) and it never sets ``local_aabb`` at all.  A 3-D mesh
+        additionally has only a stub ``cnt``, so the table is the only source.
+
+        Returns ``None`` if the geom advertises no bounds by any route.
         """
         def _split(lo_vals, hi_vals):
             to_t = lambda v: torch.tensor(
                 float(v), device=self.device, dtype=self.dtype)
             return [[to_t(v) for v in lo_vals], [to_t(v) for v in hi_vals]]
 
-        raw_bb = getattr(body, "bb", None)
+        # ---- raw extent: bb, else the contour, else the SDF table ----
         raw = None
+        raw_bb = getattr(body, "bb", None)
         if raw_bb is not None and len(raw_bb) >= D:
             try:
                 raw = _split([raw_bb[a][0] for a in range(D)],
@@ -2675,17 +2683,32 @@ class MultiAnimatBodies(Body):
                 raw = None
         if raw is None:
             cnt = getattr(body, "cnt", None)
-            if cnt is None or cnt.numel() <= D:
-                return None
-            cnt_lo = cnt.min(dim=1).values
-            cnt_hi = cnt.max(dim=1).values
-            raw = _split([cnt_lo[a] for a in range(D)],
-                         [cnt_hi[a] for a in range(D)])
+            if cnt is not None and cnt.numel() > D:
+                cnt_lo = cnt.min(dim=1).values
+                cnt_hi = cnt.max(dim=1).values
+                raw = _split([cnt_lo[a] for a in range(D)],
+                             [cnt_hi[a] for a in range(D)])
+        table = self._child_table_bounds(body, D)
+        if raw is None and table is not None:
+            # Table bounds include the mesh's own padding, so this over-states
+            # the geometry; it only ever feeds the surface-resolution choice,
+            # where erring large costs samples rather than correctness.
+            raw = _split([table[0][a] for a in range(D)],
+                         [table[1][a] for a in range(D)])
+        if raw is None:
+            return None
 
+        # ---- padded (band-covering) box ----
         local_aabb = getattr(body, "local_aabb", None)
         if local_aabb is not None:
             padded = _split([local_aabb[0, a] for a in range(D)],
                             [local_aabb[1, a] for a in range(D)])
+        elif table is not None:
+            # A mesh's table already extends past its surface; clip the union
+            # to it so the composite never queries the interpolator outside
+            # the region it can answer for.
+            padded = _split([table[0][a] for a in range(D)],
+                            [table[1][a] for a in range(D)])
         else:
             padded = _split([float(raw[0][a]) - band_margin for a in range(D)],
                             [float(raw[1][a]) + band_margin for a in range(D)])
