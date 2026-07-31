@@ -38,12 +38,13 @@ static void min_stage_2d(
     const scalar_t* kin,
     const int64_t* aabb_lo, const int64_t* aabb_dim,
     const scalar_t* gx, const scalar_t* gy,
-    int Ngy, scalar_t half_h, int B, int interp,
-    const int64_t* priv_offsets,
+    int Ngy, scalar_t half_h, int n_active, int interp,
+    const int64_t* priv_offsets, const int64_t* active_idx,
     scalar_t* priv_sdf_cc, scalar_t* priv_sdf_u, scalar_t* priv_sdf_v,
     scalar_t* priv_body_u, scalar_t* priv_body_v)
 {
-    for (int b = 0; b < B; ++b) {
+    for (int a = 0; a < n_active; ++a) {
+        const int b = (int)active_idx[a];
         int Ai = (int)aabb_dim[b*2+0], Aj = (int)aabb_dim[b*2+1];
         int body_vol = Ai * Aj;
         if (body_vol <= 0) continue;
@@ -171,13 +172,14 @@ static void min_stage_3d(
     const scalar_t* kin,
     const int64_t* aabb_lo, const int64_t* aabb_dim,
     const scalar_t* gx, const scalar_t* gy, const scalar_t* gz,
-    int Ngy, int Ngz, scalar_t half_h, int B, int interp,
-    const int64_t* priv_offsets,
+    int Ngy, int Ngz, scalar_t half_h, int n_active, int interp,
+    const int64_t* priv_offsets, const int64_t* active_idx,
     scalar_t* priv_sdf_cc, scalar_t* priv_sdf_u,
     scalar_t* priv_sdf_v, scalar_t* priv_sdf_w,
     scalar_t* priv_body_u, scalar_t* priv_body_v, scalar_t* priv_body_w)
 {
-    for (int b = 0; b < B; ++b) {
+    for (int a = 0; a < n_active; ++a) {
+        const int b = (int)active_idx[a];
         int Ai = (int)aabb_dim[b*3+0], Aj = (int)aabb_dim[b*3+1], Ak = (int)aabb_dim[b*3+2];
         int body_vol = Ai * Aj * Ak;
         if (body_vol <= 0) continue;
@@ -329,10 +331,12 @@ void streaming_sdf_stag_2d_resolve_cpu(
     const at::Tensor& priv_offsets,
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v,
     at::Tensor priv_body_u, at::Tensor priv_body_v,
+    const at::Tensor& active_idx,
     double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
     if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0) return;
+    int n_active = (int)active_idx.numel();
     int Ngy = (int)gy.numel();
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_2d_resolve_cpu", [&] {
@@ -343,8 +347,8 @@ void streaming_sdf_stag_2d_resolve_cpu(
             kin.data_ptr<scalar_t>(),
             aabb_lo.data_ptr<int64_t>(), aabb_dim.data_ptr<int64_t>(),
             gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
-            Ngy, (scalar_t)(0.5 * h_grid), B, (int)interp,
-            priv_offsets.data_ptr<int64_t>(),
+            Ngy, (scalar_t)(0.5 * h_grid), n_active, (int)interp,
+            priv_offsets.data_ptr<int64_t>(), active_idx.data_ptr<int64_t>(),
             priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(), priv_sdf_v.data_ptr<scalar_t>(),
             priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>());
 
@@ -375,9 +379,11 @@ void streaming_sdf_stag_3d_resolve_cpu(
     const at::Tensor& priv_offsets,
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v, at::Tensor priv_sdf_w,
     at::Tensor priv_body_u, at::Tensor priv_body_v, at::Tensor priv_body_w,
+    const at::Tensor& active_idx,
     double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
+    int n_active = (int)active_idx.numel();
     if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0 || dirty_Ak <= 0) return;
     int Ngy = (int)gy.numel(), Ngz = (int)gz.numel();
 
@@ -389,8 +395,8 @@ void streaming_sdf_stag_3d_resolve_cpu(
             kin.data_ptr<scalar_t>(),
             aabb_lo.data_ptr<int64_t>(), aabb_dim.data_ptr<int64_t>(),
             gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(),
-            Ngy, Ngz, (scalar_t)(0.5 * h_grid), B, (int)interp,
-            priv_offsets.data_ptr<int64_t>(),
+            Ngy, Ngz, (scalar_t)(0.5 * h_grid), n_active, (int)interp,
+            priv_offsets.data_ptr<int64_t>(), active_idx.data_ptr<int64_t>(),
             priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(),
             priv_sdf_v.data_ptr<scalar_t>(), priv_sdf_w.data_ptr<scalar_t>(),
             priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(), priv_body_w.data_ptr<scalar_t>());

@@ -280,14 +280,21 @@ def forces_method2(self, u, v, p, iteration):
     _ph_tau = (float(getattr(self, '_body_vel_blend_cells', 0.0))
                * self._cached_float('h', self.h))
 
+    # Launch extent for the FORCE sweep.  The streaming path publishes its own
+    # ``force_aabb_dim`` / ``force_max_vol``, which are the plain ``aabb_dim`` /
+    # ``max_vol`` with any force-opted-out body (a FIXED animat) zeroed out.
+    # The analytical path never sets them and falls back to sweeping every body.
+    _force_dim = _stream_step.get('force_aabb_dim', _stream_step['aabb_dim'])
+    _force_max_vol = _stream_step.get('force_max_vol', _stream_step['max_vol'])
+
     if not _fresh_out:
         out2d.zero_()
     streaming_sdf_forces_post_2d(
         sm['F_flat'], sm['F_offsets'],
         sm['body_shapes'], sm['body_meta'], _stream_step['kin'],
-        _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+        _stream_step['aabb_lo'], _force_dim,
         _stream_step['gx'], _stream_step['gy'],
-        self._cached_float('h', self.h), _stream_step['max_vol'],
+        self._cached_float('h', self.h), _force_max_vol,
         comp.sdf_val,
         interp_method,
         u.contiguous(), v.contiguous(), p.contiguous(),
@@ -380,14 +387,21 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     _fsm = int(getattr(self, 'force_submethod', 0))
     _ph_tau = (float(getattr(self, '_body_vel_blend_cells', 0.0))
                * self._cached_float('h', self.h))
+    # Launch extent for the FORCE sweep.  The streaming path publishes its own
+    # ``force_aabb_dim`` / ``force_max_vol``, which are the plain ``aabb_dim`` /
+    # ``max_vol`` with any force-opted-out body (a FIXED animat) zeroed out.
+    # The analytical path never sets them and falls back to sweeping every body.
+    _force_dim = _stream_step.get('force_aabb_dim', _stream_step['aabb_dim'])
+    _force_max_vol = _stream_step.get('force_max_vol', _stream_step['max_vol'])
+
     if not _fresh_out:
         out.zero_()
     streaming_sdf_forces_post_3d(
         _stream_static['F_flat'], _stream_static['F_offsets'],
         _stream_static['body_shapes'], _stream_static['body_meta'],
-        _stream_step['kin'], _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+        _stream_step['kin'], _stream_step['aabb_lo'], _force_dim,
         _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
-        self._cached_float('h', self.h), _stream_step['max_vol'],
+        self._cached_float('h', self.h), _force_max_vol,
         comp.sdf_val,
         getattr(self, '_sdf_interp_method', 0),
         u.contiguous(), v.contiguous(), w.contiguous(), p.contiguous(),

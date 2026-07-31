@@ -80,7 +80,10 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // union dirty AABB, reads each covering body's private buffer, picks
     // the minimum SDF (no atomics, single thread per global cell), and
     // writes the winner to the global output tensors.  Full fp64 precision
-    // (no packed key).  priv_offsets is int64 [B+1] cumulative body_vol.
+    // (no packed key).  priv_offsets is int64 [B+1], the cumulative sum of
+    // the per-body grow-only slab capacities.  active_idx selects which
+    // bodies the MIN stage restreams; the resolve stage always sweeps all B,
+    // so a skipped (static) body still contributes its earlier slab.
     m.def(
         "streaming_sdf_stag_2d_resolve("
         "Tensor F_flat, Tensor F_offsets,"
@@ -95,6 +98,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor priv_offsets,"
         " Tensor(f!) priv_sdf_cc, Tensor(g!) priv_sdf_u, Tensor(h!) priv_sdf_v,"
         " Tensor(i!) priv_body_u, Tensor(j!) priv_body_v,"
+        " Tensor active_idx,"
         " float blend_eps"
         ") -> ()");
 
@@ -113,6 +117,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor priv_offsets,"
         " Tensor(h!) priv_sdf_cc, Tensor(i!) priv_sdf_u, Tensor(j!) priv_sdf_v, Tensor(k!) priv_sdf_w,"
         " Tensor(l!) priv_body_u, Tensor(m!) priv_body_v, Tensor(n!) priv_body_w,"
+        " Tensor active_idx,"
         " float blend_eps"
         ") -> ()");
 

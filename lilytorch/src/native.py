@@ -1,4 +1,5 @@
 """Thin Python wrappers around ``torch.ops.lilytorch_kernels.*``."""
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -148,6 +149,7 @@ def streaming_sdf_stag_2d_resolve(
         priv_offsets: Tensor,
         priv_sdf_cc: Tensor, priv_sdf_u: Tensor, priv_sdf_v: Tensor,
         priv_body_u: Tensor, priv_body_v: Tensor,
+        active_idx: Tensor,
         blend_eps: float = 0.0) -> None:
     """2-D Regime-B streaming SDF: per-body private buffers + resolve.
 
@@ -160,8 +162,12 @@ def streaming_sdf_stag_2d_resolve(
        Σwᵢvᵢ/Σwᵢ, wᵢ = sigmoid(-sᵢ/blend_eps), accumulated in registers
        over the covering bodies (deterministic — no atomics).
 
-    ``priv_offsets``: int64 [B+1] cumulative body_vol offsets.
+    ``priv_offsets``: int64 [B+1] cumulative per-body capacity offsets.
     ``priv_sdf_cc``, etc.: flat tensors of size ``priv_offsets[-1]``.
+    ``active_idx``: int64 [n_active] body indices the MIN stage restreams.
+    The resolve stage always sweeps all B bodies, so a body left out keeps
+    contributing the slab it wrote on an earlier step — which is how a static
+    body is skipped without changing the union.
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_resolve.default(
         F_flat, F_offsets, body_shapes, body_meta, kin,
@@ -173,6 +179,7 @@ def streaming_sdf_stag_2d_resolve(
         priv_offsets,
         priv_sdf_cc, priv_sdf_u, priv_sdf_v,
         priv_body_u, priv_body_v,
+        active_idx,
         float(blend_eps),
     )
 
@@ -191,6 +198,7 @@ def streaming_sdf_stag_3d_resolve(
         priv_offsets: Tensor,
         priv_sdf_cc: Tensor, priv_sdf_u: Tensor, priv_sdf_v: Tensor, priv_sdf_w: Tensor,
         priv_body_u: Tensor, priv_body_v: Tensor, priv_body_w: Tensor,
+        active_idx: Tensor,
         blend_eps: float = 0.0) -> None:
     """3-D Regime-B streaming SDF: per-body private buffers + resolve.
 
@@ -208,6 +216,7 @@ def streaming_sdf_stag_3d_resolve(
         priv_offsets,
         priv_sdf_cc, priv_sdf_u, priv_sdf_v, priv_sdf_w,
         priv_body_u, priv_body_v, priv_body_w,
+        active_idx,
         float(blend_eps),
     )
 
@@ -1163,73 +1172,116 @@ class RegularGridInterpolator:
 # NO per-call allocation and NO host sync (the killer was ``total_vol.item()``).
 _priv_cache: dict = {}
 
+#: Per-body slab alignment, in elements.  A cumulative layout starts each body
+#: at an arbitrary offset, which costs coalescing on the first/last warp of
+#: every body; rounding each capacity up to a warp keeps the old alignment for
+#: a few KB of padding.
+_PRIV_ALIGN = 32
 
-def _regime_b_priv(B, max_vol, dtype, device, ndim):
-    """Sync-free private buffers + offsets for the Regime-B resolve.
 
-    Uses a UNIFORM per-body stride of ``max_vol`` (host-known: ``B`` from
-    ``aabb_dim.shape[0]``, ``max_vol`` a python int), so:
-      * offsets = arange(B+1)*max_vol — no cumsum, no ``.item()``, no D→H sync;
-      * buffers sized to ``B*max_vol`` (≥ Σ body_vol), grow-only + reused.
-    Body ``b`` owns the disjoint slice ``[b*max_vol, b*max_vol+body_vol[b])``, which
-    is what the min/resolve kernels index via ``priv_offsets[b]+local``.
+def _regime_b_priv(vols, dtype, device, ndim):
+    """Sync-free private buffers + CUMULATIVE offsets for the Regime-B resolve.
+
+    ``vols`` is a host ``int64`` array of per-body AABB volumes — the caller
+    already has it (``dims.prod(axis=1)`` in ``BDIMhandler``), so the layout is
+    computed entirely host-side: no ``cumsum`` on device, no ``.item()``, no
+    D→H sync.  That was the constraint that produced the earlier UNIFORM
+    ``B * max_vol`` stride, which is correct but sizes every body's slab to the
+    LARGEST body's: one oversized body (an immersed ramp spanning most of the
+    grid) then inflated the allocation ~20x, to several GiB.
+
+    Each body's capacity is grow-only and warp-aligned, so ``priv_offsets`` is
+    STABLE while the per-body AABBs stay within their high-water mark.  That
+    stability is what lets the caller skip re-streaming a static body: its
+    slab keeps last step's contents in place.  ``layout_changed`` is True
+    whenever an offset moved or the buffers were reallocated, and the caller
+    must then re-stream every body.
+
+    Returns ``(priv_offsets, bufs, layout_changed)``.
     """
-    need = int(B) * int(max_vol)
+    vols = np.asarray(vols, dtype=np.int64).reshape(-1)
+    B = int(vols.size)
     n_bufs = 5 if ndim == 2 else 7
     key = (device, dtype, ndim)
     ent = _priv_cache.get(key)
+
+    caps = ((np.maximum(vols, 1) + _PRIV_ALIGN - 1) // _PRIV_ALIGN) * _PRIV_ALIGN
+    if ent is not None and ent["caps"].size == B:
+        caps = np.maximum(caps, ent["caps"])          # grow-only per body
+    starts = np.concatenate(([0], np.cumsum(caps))).astype(np.int64)
+    need = int(starts[-1])
+
+    layout_changed = (
+        ent is None
+        or ent["caps"].size != B
+        or not np.array_equal(caps, ent["caps"])
+    )
     if ent is None or ent["cap"] < need:
+        # Reallocation moves every slab, so the caller must re-stream all.
         cap = max(need, (ent["cap"] if ent else 0))
-        ent = {"cap": cap,
-               "bufs": [torch.empty(cap, dtype=dtype, device=device)
-                        for _ in range(n_bufs)]}
+        ent = {"cap": cap, "bufs": [torch.empty(cap, dtype=dtype, device=device)
+                                    for _ in range(n_bufs)]}
+        layout_changed = True
+    if layout_changed:
+        ent["caps"] = caps
+        ent["offsets"] = torch.from_numpy(starts).to(device, non_blocking=True)
         _priv_cache[key] = ent
-    offsets = torch.arange(B + 1, dtype=torch.int64, device=device) * int(max_vol)
-    return offsets, ent["bufs"]
+    return ent["offsets"], ent["bufs"], layout_changed
 
 
 def body_update_2d(
     F_flat, F_offsets, body_shapes, body_meta, kin,
-    aabb_lo, aabb_dim, gx, gy, h, max_vol,
+    aabb_lo, aabb_dim, gx, gy, h, vols,
     sdf_cc, sdf_u, sdf_v, body_u, body_v,
     interp_method,
     dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-    blend_eps=0.0,
+    blend_eps=0.0, active_idx=None,
 ):
     """Native 2-D streaming SDF body update (eager path).
 
     The caller (BDIMhandler) pre-fills ``sdf_*`` to +FAR and ``body_*`` to 0
-    before every call — the kernels only write body-covered cells."""
-    if int(dirty_Ai) * int(dirty_Aj) <= 0:
-        return
+    before every call — the kernels only write body-covered cells.
 
-    priv_offsets, pb = _regime_b_priv(
-        body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 2)
+    ``vols`` is the host per-body AABB volume array.  ``active_idx`` selects
+    which bodies the min-kernel restreams; ``None`` means all of them.  The
+    resolve kernel always sweeps every body, so a skipped body still
+    contributes — from the slab it wrote on an earlier step.  Returns the
+    ``layout_changed`` flag: True when the private-buffer layout moved, so the
+    caller must treat every body as active on the NEXT call too."""
+    priv_offsets, pb, layout_changed = _regime_b_priv(
+        vols, sdf_cc.dtype, sdf_cc.device, 2)
+    if int(dirty_Ai) * int(dirty_Aj) <= 0:
+        return layout_changed
+
+    active_idx, max_vol = _active_launch_extent(vols, active_idx, sdf_cc.device)
     streaming_sdf_stag_2d_resolve(
         F_flat, F_offsets, body_shapes, body_meta, kin,
         aabb_lo, aabb_dim, gx, gy, float(h), int(max_vol),
         sdf_cc, sdf_u, sdf_v, body_u, body_v, int(interp_method),
         int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
         priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4],
+        active_idx,
         blend_eps=float(blend_eps),
     )
+    return layout_changed
 
 
 def body_update_3d(
     F_flat, F_offsets, body_shapes, body_meta, kin,
-    aabb_lo, aabb_dim, gx, gy, gz, h, max_vol,
+    aabb_lo, aabb_dim, gx, gy, gz, h, vols,
     sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
     interp_method,
     dirty_i0, dirty_j0, dirty_k0,
     dirty_Ai, dirty_Aj, dirty_Ak,
-    blend_eps=0.0,
+    blend_eps=0.0, active_idx=None,
 ):
     """Native 3-D streaming SDF body update (eager path).  See 2-D."""
+    priv_offsets, pb, layout_changed = _regime_b_priv(
+        vols, sdf_cc.dtype, sdf_cc.device, 3)
     if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
-        return
+        return layout_changed
 
-    priv_offsets, pb = _regime_b_priv(
-        body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 3)
+    active_idx, max_vol = _active_launch_extent(vols, active_idx, sdf_cc.device)
     streaming_sdf_stag_3d_resolve(
         F_flat, F_offsets, body_shapes, body_meta, kin,
         aabb_lo, aabb_dim, gx, gy, gz, float(h), int(max_vol),
@@ -1237,7 +1289,28 @@ def body_update_3d(
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
         priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6],
+        active_idx,
         blend_eps=float(blend_eps),
     )
+    return layout_changed
+
+
+def _active_launch_extent(vols, active_idx, device):
+    """``(active_idx tensor, max active volume)`` for the min-kernel launch.
+
+    The launch grid is rectangular — ``dim3(blocks_per_body, n_active)`` — so
+    it has to be sized from the largest ACTIVE body.  Sizing it from the
+    largest body overall is what let one huge static body inflate the grid for
+    every other body (the kernel's grid-stride loop bounds real work to each
+    body's own volume, so those extra blocks retire immediately, but they are
+    still launched).  Restricting the max to the active set removes that.
+    """
+    vols = np.asarray(vols, dtype=np.int64).reshape(-1)
+    if active_idx is None:
+        idx_np = np.arange(vols.size, dtype=np.int64)
+    else:
+        idx_np = np.asarray(active_idx, dtype=np.int64).reshape(-1)
+    max_vol = int(vols[idx_np].max()) if idx_np.size else 0
+    return torch.from_numpy(idx_np).to(device, non_blocking=True), max_vol
 
 

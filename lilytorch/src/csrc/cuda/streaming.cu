@@ -16,8 +16,14 @@
 //     to the global output tensors.  Full fp64 precision.
 //
 //  Private buffers are flat tensors with per-body cumulative offsets:
-//    priv_offsets[b] = sum_{i < b} body_vol[i]
+//    priv_offsets[b] = sum_{i < b} cap[i]      (cap = grow-only body_vol)
 //    priv_sdf_cc[priv_offsets[b] + local]  ←  body b, local idx
+//
+//  The min-kernel restreams only the bodies listed in ``active_idx``; the
+//  resolve kernel always sweeps all B.  A body left out of active_idx keeps
+//  contributing the slab it wrote on an earlier step, which is how a STATIC
+//  body is skipped without changing the union.  Because the capacities are
+//  grow-only, priv_offsets is stable across steps and those slabs stay put.
 // =====================================================================
 
 #include <ATen/Operators.h>
@@ -42,13 +48,14 @@ __global__ void regime_b_min_kernel_2d(
     const scalar_t* __restrict__ kin,
     const int64_t* __restrict__ aabb_lo, const int64_t* __restrict__ aabb_dim,
     const scalar_t* __restrict__ gx, const scalar_t* __restrict__ gy,
-    int Ngy, scalar_t half_h, int B, int interp,
+    int Ngy, scalar_t half_h, int n_active, int interp,
     const int64_t* __restrict__ priv_offsets,
+    const int64_t* __restrict__ active_idx,
     scalar_t* __restrict__ priv_sdf_cc, scalar_t* __restrict__ priv_sdf_u, scalar_t* __restrict__ priv_sdf_v,
     scalar_t* __restrict__ priv_body_u, scalar_t* __restrict__ priv_body_v)
 {
-    int b = blockIdx.y;  // body index
-    if (b >= B) return;
+    if (blockIdx.y >= n_active) return;
+    int b = (int)active_idx[blockIdx.y];  // body index
 
     int Ai = (int)aabb_dim[b*2+0], Aj = (int)aabb_dim[b*2+1];
     int body_vol = Ai * Aj;
@@ -171,14 +178,15 @@ __global__ void regime_b_min_kernel_3d(
     const scalar_t* __restrict__ kin,
     const int64_t* __restrict__ aabb_lo, const int64_t* __restrict__ aabb_dim,
     const scalar_t* __restrict__ gx, const scalar_t* __restrict__ gy, const scalar_t* __restrict__ gz,
-    int Ngy, int Ngz, scalar_t half_h, int B, int interp,
+    int Ngy, int Ngz, scalar_t half_h, int n_active, int interp,
     const int64_t* __restrict__ priv_offsets,
+    const int64_t* __restrict__ active_idx,
     scalar_t* __restrict__ priv_sdf_cc, scalar_t* __restrict__ priv_sdf_u,
     scalar_t* __restrict__ priv_sdf_v, scalar_t* __restrict__ priv_sdf_w,
     scalar_t* __restrict__ priv_body_u, scalar_t* __restrict__ priv_body_v, scalar_t* __restrict__ priv_body_w)
 {
-    int b = blockIdx.y;
-    if (b >= B) return;
+    if (blockIdx.y >= n_active) return;
+    int b = (int)active_idx[blockIdx.y];
 
     int Ai = (int)aabb_dim[b*3+0], Aj = (int)aabb_dim[b*3+1], Ak = (int)aabb_dim[b*3+2];
     int body_vol = Ai * Aj * Ak;
@@ -318,34 +326,41 @@ void streaming_sdf_stag_2d_resolve_cuda(
     const at::Tensor& priv_offsets,
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v,
     at::Tensor priv_body_u, at::Tensor priv_body_v,
+    const at::Tensor& active_idx,
     double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
+    int n_active = (int)active_idx.numel();
     if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0) return;
     cudaStream_t s = at::cuda::getCurrentCUDAStream();
     int Ngy = (int)gy.numel();
     int64_t dirty_vol = dirty_Ai * dirty_Aj;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_2d_resolve", [&] {
-        // ----- min-kernel: fanned per-body -----
-        {
+        // ----- min-kernel: fanned per-body (active bodies only) -----
+        // gridDim.y == 0 is an invalid launch, and with every body static
+        // there is nothing to restream — the resolve stage below still runs
+        // and rebuilds the outputs from the retained per-body slabs.
+        if (n_active > 0) {
             int bs = 256;
-            // Grid sizing from the caller-supplied max body volume.  (Do NOT
-            // host-deref aabb_dim here: it is a CUDA tensor, so reading its
-            // data_ptr on the host is an illegal device-memory access — the
-            // former crash.  max_vol_per_body already = max_b prod(aabb_dim[b]).)
+            // Grid sizing from the caller-supplied max ACTIVE body volume.
+            // (Do NOT host-deref aabb_dim here: it is a CUDA tensor, so
+            // reading its data_ptr on the host is an illegal device-memory
+            // access — the former crash.  The caller computes the max from its
+            // own host-side copy of the volumes.)
             int64_t max_vol = max_vol_per_body;
             int blocks_per_body = (int)((max_vol + bs - 1) / bs);
             if (blocks_per_body < 1) blocks_per_body = 1;
             regime_b_min_kernel_2d<scalar_t>
-                <<<dim3(blocks_per_body, B, 1), dim3(bs, 1, 1), 0, s>>>(
+                <<<dim3(blocks_per_body, n_active, 1), dim3(bs, 1, 1), 0, s>>>(
                     F_flat.data_ptr<scalar_t>(), F_offsets.data_ptr<int64_t>(),
                     body_shapes.data_ptr<int64_t>(), body_meta.data_ptr<scalar_t>(),
                     kin.data_ptr<scalar_t>(),
                     aabb_lo.data_ptr<int64_t>(), aabb_dim.data_ptr<int64_t>(),
                     gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
-                    Ngy, (scalar_t)(0.5 * h_grid), B, (int)interp,
+                    Ngy, (scalar_t)(0.5 * h_grid), n_active, (int)interp,
                     priv_offsets.data_ptr<int64_t>(),
+                    active_idx.data_ptr<int64_t>(),
                     priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(), priv_sdf_v.data_ptr<scalar_t>(),
                     priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>());
             cudaError_t err = cudaGetLastError();
@@ -389,17 +404,22 @@ void streaming_sdf_stag_3d_resolve_cuda(
     const at::Tensor& priv_offsets,
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v, at::Tensor priv_sdf_w,
     at::Tensor priv_body_u, at::Tensor priv_body_v, at::Tensor priv_body_w,
+    const at::Tensor& active_idx,
     double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
+    int n_active = (int)active_idx.numel();
     if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0 || dirty_Ak <= 0) return;
     cudaStream_t s = at::cuda::getCurrentCUDAStream();
     int Ngy = (int)gy.numel(), Ngz = (int)gz.numel();
     int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_3d_resolve", [&] {
-        // ----- min-kernel: fanned per-body -----
-        {
+        // ----- min-kernel: fanned per-body (active bodies only) -----
+        // gridDim.y == 0 is an invalid launch, and with every body static
+        // there is nothing to restream — the resolve stage below still runs
+        // and rebuilds the outputs from the retained per-body slabs.
+        if (n_active > 0) {
             int bs = 256;
             // Grid sizing from the caller-supplied max body volume (see the
             // 2-D launcher note — host-deref of the CUDA aabb_dim was the crash).
@@ -407,14 +427,15 @@ void streaming_sdf_stag_3d_resolve_cuda(
             int blocks_per_body = (int)((max_vol + bs - 1) / bs);
             if (blocks_per_body < 1) blocks_per_body = 1;
             regime_b_min_kernel_3d<scalar_t>
-                <<<dim3(blocks_per_body, B, 1), dim3(bs, 1, 1), 0, s>>>(
+                <<<dim3(blocks_per_body, n_active, 1), dim3(bs, 1, 1), 0, s>>>(
                     F_flat.data_ptr<scalar_t>(), F_offsets.data_ptr<int64_t>(),
                     body_shapes.data_ptr<int64_t>(), body_meta.data_ptr<scalar_t>(),
                     kin.data_ptr<scalar_t>(),
                     aabb_lo.data_ptr<int64_t>(), aabb_dim.data_ptr<int64_t>(),
                     gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(),
-                    Ngy, Ngz, (scalar_t)(0.5 * h_grid), B, (int)interp,
+                    Ngy, Ngz, (scalar_t)(0.5 * h_grid), n_active, (int)interp,
                     priv_offsets.data_ptr<int64_t>(),
+                    active_idx.data_ptr<int64_t>(),
                     priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(),
                     priv_sdf_v.data_ptr<scalar_t>(), priv_sdf_w.data_ptr<scalar_t>(),
                     priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(), priv_body_w.data_ptr<scalar_t>());

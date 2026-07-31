@@ -1006,6 +1006,25 @@ class BDIMhandler:
             'grid_origin_np':  np.array(grid_origin, dtype=self.dtype_np),
             'gs_np':           np.array(gs, dtype=np.int64),
         }
+        # Rotation-INVARIANT per-body slab capacity for the streaming private
+        # buffers.  The per-step AABB fluctuates as the body rotates; sizing
+        # the slabs from it would shift every later body's offset and move the
+        # slabs, which is exactly what the static-body skip relies on NOT
+        # happening.  A rotation can align the local box's diagonal with any
+        # axis, so ||local_half||_2 bounds the world half-extent on every axis
+        # for all time — clipped to the grid, this capacity is computed once
+        # and never grows.
+        half_np = kin_static['local_half_np']
+        diag = np.linalg.norm(half_np, axis=1)                     # [B]
+        side = 2 * np.ceil(diag * kin_static['inv_h']) + 2 * kin_static['pad'] + 2
+        caps = np.minimum(side[:, None], kin_static['gs_np'][None, :])
+        caps = np.maximum(caps.astype(np.int64).prod(axis=1), 1)
+        # A body whose bound already exceeds the >90 % full-grid fallback
+        # threshold can have its per-step window widened to the WHOLE grid by
+        # that fallback, so its slab has to be able to hold it.
+        full_vol = int(kin_static['gs_np'].prod())
+        caps = np.where(caps > int(0.9 * full_vol), full_vol, caps)
+        kin_static['caps_np'] = caps
         setattr(comp, attr, kin_static)
         return kin_static
 
@@ -1511,6 +1530,35 @@ class BDIMhandler:
             mask = (sdf_m >= 0) & (sdf_p >= 0)
         body.mask = mask
 
+    def _force_readout_dims(self, comp, dims):
+        """``dims`` with the force-opted-out bodies zeroed, for the force kernels.
+
+        Returns ``dims`` ITSELF (not a copy) when every body wants the readout,
+        so the common case allocates nothing and the caller can reuse the
+        already-uploaded device tensor by identity.
+
+        The mask comes from ``body.fluid_force_readout``, set once at
+        construction from the animat's spawn mode, so it is cached after the
+        first call rather than re-derived per step.
+        """
+        mask = getattr(comp, '_force_readout_mask', None)
+        if mask is None:
+            flags = [bool(getattr(b, 'fluid_force_readout', True))
+                     for b in comp.bodies]
+            mask = np.array(flags, dtype=bool) if flags else np.zeros(0, dtype=bool)
+            comp._force_readout_mask = mask
+            n_off = int((~mask).sum())
+            if n_off:
+                names = [getattr(b, 'name', f'body{i}')
+                         for i, b in enumerate(comp.bodies) if not mask[i]]
+                print(f"  Fluid force readout skipped for {n_off} body/bodies: "
+                      f"{', '.join(names)} (still immersed; force slot reads 0).")
+        if mask.size == 0 or mask.all():
+            return dims
+        out = dims.copy()
+        out[~mask] = 0
+        return out
+
     def _update_streaming_multi(self, t, iteration, dt=1):
         """Unified batched multi-body streaming SDF update (2-D + 3-D).
 
@@ -1601,7 +1649,38 @@ class BDIMhandler:
             i_hi[fallback, :] = gs_np
             dims = i_hi - i_lo
 
-        max_vol = int(dims.prod(axis=1).max()) if B > 0 else 0
+        # ---- which bodies actually moved since the previous step? ----
+        # A body whose pose, velocity and AABB are all bit-identical to last
+        # step re-derives the identical slab, so the min-kernel can skip it and
+        # the resolve stage reuses what it wrote before.  Detecting this from
+        # the kinematics rather than a "static" config flag means a FIXED
+        # animat (an immersed ramp — typically the largest body in the scene,
+        # and pure waste to restream) is caught automatically, and anything
+        # that starts moving is picked up again on the step it does.
+        sig = np.concatenate([
+            body_R_np.reshape(B, -1), body_pos_np, com_pos_np,
+            lin_vel_np, ang_vel_np.reshape(B, -1),
+        ], axis=1).astype(np.float64) if B else np.zeros((0, 1))
+        # Skipping only works while the OUTPUT buffers persist between steps:
+        # a skipped body contributes nothing this step, so its imprint has to
+        # still be sitting in the staggered SDF / velocity fields from the last
+        # one.  That holds on the CUDA-graph path (persistent buffers, only the
+        # dirty sub-block refilled) but NOT on the eager path, where the fields
+        # are freshly allocated here and then nulled by the solver before the
+        # pressure projection (``bdim_fields_scratch``).  Mirror the
+        # ``graph_mode`` predicate from :meth:`_launch_body_update`.
+        persistent = (comp.sdf_val.is_cuda
+                      and fs._body_vel_blend_cells * float(comp.h) <= 0.0)
+        prev_sig = getattr(comp, '_stream_prev_sig', None)
+        prev_lo  = getattr(comp, '_stream_prev_lo', None)
+        if (persistent and prev_sig is not None and prev_sig.shape == sig.shape
+                and prev_lo is not None and prev_lo[0].shape == i_lo.shape):
+            moved = ~(np.all(sig == prev_sig, axis=1)
+                      & np.all(i_lo == prev_lo[0], axis=1)
+                      & np.all(dims == prev_lo[1], axis=1))
+        else:
+            moved = np.ones(B, dtype=bool)          # first step: stream all
+        active_np = np.nonzero(moved)[0].astype(np.int64)
 
         # ---- per-body AABB metadata + current/dirty union AABB ----
         for b in range(B):
@@ -1617,15 +1696,42 @@ class BDIMhandler:
             curr_lo = [0] * D
             curr_hi = [int(gs[ax]) for ax in range(D)]
 
+        # The dirty region only has to cover the bodies that MOVED (previous
+        # ∪ current extent).  A cell touched by no moving body cannot change:
+        # the static bodies covering it still resolve to the same winner, and
+        # the outputs there already hold that value.  With a large static body
+        # this is the difference between resetting + resolving most of the grid
+        # every step and touching only the swimmer's footprint.
         prev = getattr(comp, '_combined_union_aabb', None)
+        # The BDIM apply rect is a SEPARATE, wider region and must keep
+        # covering every body.  It bounds where the solver re-imposes the BDIM
+        # velocity / Poisson coefficients each step, and the FLUID there
+        # changes every step even where the body does not — shrinking it to the
+        # moving bodies silently stops enforcing no-slip on a static one.
+        f_lo = list(curr_lo)
+        f_hi = list(curr_hi)
         if prev is not None:
-            d_lo = [min(prev[2 * ax],     curr_lo[ax]) for ax in range(D)]
-            d_hi = [max(prev[2 * ax + 1], curr_hi[ax]) for ax in range(D)]
+            f_lo = [min(prev[2 * ax],     f_lo[ax]) for ax in range(D)]
+            f_hi = [max(prev[2 * ax + 1], f_hi[ax]) for ax in range(D)]
+
+        if prev is None or moved.all():
+            # First step (comp.sdf_val is _FAR everywhere), or everything
+            # moved: the streaming region is the full union too.
+            d_lo, d_hi = list(f_lo), list(f_hi)
+        elif active_np.size:
+            a_lo = i_lo[active_np]
+            a_hi = i_hi[active_np]
+            p_lo = prev_lo[0][active_np]
+            p_hi = (prev_lo[0] + prev_lo[1])[active_np]
+            d_lo = [int(min(a_lo[:, ax].min(), p_lo[:, ax].min())) for ax in range(D)]
+            d_hi = [int(max(a_hi[:, ax].max(), p_hi[:, ax].max())) for ax in range(D)]
         else:
-            # First step: comp.sdf_val starts at _FAR everywhere, so the
-            # current union AABB alone is a safe dirty region.
-            d_lo = list(curr_lo)
-            d_hi = list(curr_hi)
+            d_lo = [0] * D                          # nothing moved: no work
+            d_hi = [0] * D
+
+        comp._stream_prev_sig = sig
+        comp._stream_prev_lo  = (i_lo.copy(), dims.copy())
+        comp._stream_active_np = active_np
 
         # Reset running-min CC SDF in the dirty sub-block (O(dirty_vol)).
         comp._sdf_sparse = [None] * B
@@ -1652,6 +1758,24 @@ class BDIMhandler:
         aabb_dim  = torch.from_numpy(np.ascontiguousarray(dims)).to(self.device)
         com_pos_t = torch.from_numpy(np.ascontiguousarray(com_pos_np)).to(self.device)
 
+        # ---- separate launch extent for the post-step FORCE kernels --------
+        # A body with ``fluid_force_readout=False`` (a FIXED/welded animat --
+        # see MultiAnimatBodies) still needs its full ``aabb_dim`` above: that
+        # is what streams it into the union SDF and enforces no-slip on it.
+        # Only its FORCE sweep is dropped, so the force kernels get their own
+        # zeroed-out copy of the dims and their own max_vol.  Zeroing a body's
+        # dims makes every thread of its blocks exit on the bounds check, and
+        # its ``out`` row stays 0 because the kernel zeroes that buffer every
+        # step.
+        force_dims = self._force_readout_dims(comp, dims)
+        if force_dims is dims:
+            force_aabb_dim, force_max_vol = aabb_dim, (
+                int(dims.prod(axis=1).max()) if B > 0 else 0)
+        else:
+            force_aabb_dim = torch.from_numpy(
+                np.ascontiguousarray(force_dims)).to(self.device)
+            force_max_vol = (int(force_dims.prod(axis=1).max()) if B > 0 else 0)
+
         # ---- maintain comp.com_pos / body.com_pos views for downstream code ----
         for b, body in enumerate(comp.bodies):
             comp.com_pos[b] = com_pos_t[b]
@@ -1670,7 +1794,20 @@ class BDIMhandler:
             'kin':      kin,
             'aabb_lo':  aabb_lo,
             'aabb_dim': aabb_dim,
-            'max_vol':  max_vol,
+            # Per-body slab capacities (rotation-invariant, fixed for the run)
+            # and the indices of the bodies the min-kernel must restream.
+            'caps':      kin_static['caps_np'],
+            'active_np': active_np,
+            # Max over ALL bodies: the min-kernel's launch, sized from the
+            # active subset, is a separate thing (see 'active_np').
+            'max_vol':   int(dims.prod(axis=1).max()) if B > 0 else 0,
+            # What the post-step FORCE kernels launch over.  Same as the above
+            # unless some body opted out of the force readout, in which case
+            # both its dims and its contribution to max_vol are zeroed -- which
+            # is where the win is, since one scene-scale static body otherwise
+            # sets max_vol for all B.
+            'force_aabb_dim': force_aabb_dim,
+            'force_max_vol':  force_max_vol,
         }
         for ax, a in enumerate(anames):
             kstep[f'g{a}'] = g_1d[ax]
@@ -1678,9 +1815,16 @@ class BDIMhandler:
         kstep['dirty_j0'] = int(d_lo[1])
         kstep['dirty_Ai'] = int(d_hi[0] - d_lo[0])
         kstep['dirty_Aj'] = int(d_hi[1] - d_lo[1])
+        # Wider rect for the BDIM apply — see the note where f_lo/f_hi is built.
+        kstep['bdim_i0'] = int(f_lo[0])
+        kstep['bdim_j0'] = int(f_lo[1])
+        kstep['bdim_Ai'] = int(f_hi[0] - f_lo[0])
+        kstep['bdim_Aj'] = int(f_hi[1] - f_lo[1])
         if D == 3:
             kstep['dirty_k0'] = int(d_lo[2])
             kstep['dirty_Ak'] = int(d_hi[2] - d_lo[2])
+            kstep['bdim_k0'] = int(f_lo[2])
+            kstep['bdim_Ak'] = int(f_hi[2] - f_lo[2])
         comp._kernel_step = kstep
 
         # ---- rigid streaming body_update (formerly "Kernel A") ----
@@ -1771,13 +1915,14 @@ class BDIMhandler:
                 sm['body_shapes'], sm['body_meta'], kstep['kin'],
                 kstep['aabb_lo'], kstep['aabb_dim'],
                 kstep['gx'], kstep['gy'],
-                float(comp.h), int(kstep['max_vol']),
+                float(comp.h), kstep['caps'],
                 comp.sdf_val, sdf_stag[0], sdf_stag[1],
                 bvel[0], bvel[1],
                 int(getattr(fs, '_sdf_interp_method', 0)),
                 int(kstep['dirty_i0']), int(kstep['dirty_j0']),
                 int(kstep['dirty_Ai']), int(kstep['dirty_Aj']),
                 blend_eps=float(blend_eps),
+                active_idx=kstep['active_np'],
             )
         else:
             body_update_3d(
@@ -1785,7 +1930,7 @@ class BDIMhandler:
                 sm['body_shapes'], sm['body_meta'], kstep['kin'],
                 kstep['aabb_lo'], kstep['aabb_dim'],
                 kstep['gx'], kstep['gy'], kstep['gz'],
-                float(comp.h), int(kstep['max_vol']),
+                float(comp.h), kstep['caps'],
                 comp.sdf_val, sdf_stag[0], sdf_stag[1], sdf_stag[2],
                 bvel[0], bvel[1], bvel[2],
                 int(getattr(fs, '_sdf_interp_method', 0)),
@@ -1794,6 +1939,7 @@ class BDIMhandler:
                 int(kstep['dirty_Ai']), int(kstep['dirty_Aj']),
                 int(kstep['dirty_Ak']),
                 blend_eps=float(blend_eps),
+                active_idx=kstep['active_np'],
             )
 
         # ---- publish the solver contract fields ----
@@ -1802,11 +1948,11 @@ class BDIMhandler:
         if D == 3:
             comp.sdf_val_w = sdf_stag[2]
             comp.body_w = bvel[2]
-        dirty = {'i0': int(kstep['dirty_i0']), 'j0': int(kstep['dirty_j0']),
-                 'Ai': int(kstep['dirty_Ai']), 'Aj': int(kstep['dirty_Aj'])}
+        dirty = {'i0': int(kstep['bdim_i0']), 'j0': int(kstep['bdim_j0']),
+                 'Ai': int(kstep['bdim_Ai']), 'Aj': int(kstep['bdim_Aj'])}
         if D == 3:
-            dirty['k0'] = int(kstep['dirty_k0'])
-            dirty['Ak'] = int(kstep['dirty_Ak'])
+            dirty['k0'] = int(kstep['bdim_k0'])
+            dirty['Ak'] = int(kstep['bdim_Ak'])
         comp.bdim_dirty = dirty
         comp.bdim_fields_scratch = not graph_mode
 

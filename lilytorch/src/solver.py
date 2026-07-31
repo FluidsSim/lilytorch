@@ -468,6 +468,18 @@ class FluidSolver(PlottingMixin):
             self.lagr_sample_offset_friction = _f
 
         self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
+
+        # Stop the run when a body's COM leaves the fluid box.  Right for a
+        # box that is the whole world (drop tests, 1guilla): a body outside it
+        # has no fluid to be in, so the run is meaningless from there on.
+        # Wrong when the box is a WINDOW inside a larger MuJoCo scene: an
+        # amphibious animat legitimately starts on dry land outside the box,
+        # enters it, and leaves again.  Set false there — the streaming update
+        # already collapses an out-of-box body to a zero-size AABB, so it
+        # simply contributes nothing to the flow and receives no fluid load.
+        self.terminate_on_body_exit = bool(
+            solver.get("terminate_on_body_exit", True))
+
         # Smooth body-velocity blend in the overlap band (kernel path).
         # Width given in grid cells; <=0 / None → legacy hard running-min
         # winner-take-all.  See BDIMhandler / streaming_sdf.cu.
@@ -897,6 +909,13 @@ class FluidSolver(PlottingMixin):
         """
         Return True if all bodies' x are inside the domain
         """
+        return torch.all(self.inside_mask(x))
+
+    def inside_mask(self, x):
+        """
+        Return the per-body boolean mask of which bodies' x are inside
+        the domain.
+        """
         in_xy = torch.logical_and(
             x[:,0]>self.xmin,
             torch.logical_and(
@@ -912,7 +931,7 @@ class FluidSolver(PlottingMixin):
                 in_xy,
                 torch.logical_and(x[:,2]>self.zmin, x[:,2]<self.zmax)
             )
-        return torch.all(in_xy)
+        return in_xy
 
     def _load_initial_conditions(self):
         ''' Load initial conditions from a previous simulation '''

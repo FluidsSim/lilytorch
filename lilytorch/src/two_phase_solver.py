@@ -39,12 +39,20 @@ The hydrostatic interface jump and the buoyancy on the body therefore emerge
 automatically from the density-weighted pressure (``∇p = ρ_fluid g`` at rest).
 """
 
+import os
+
 import torch
 
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src import forces as _forces
 from lilytorch.src.advection import _sl
 from lilytorch.src.two_phase import TwoPhase
+
+# Debug override for the Poisson coefficient floor (see
+# ``TwoPhaseSolver._coeff_floor``).  Read once at import: it used to be an
+# ``os.environ`` lookup inside the per-step rescale.
+_COEFF_FLOOR_ENV = os.environ.get("LILYTORCH_COEFF_FLOOR")
+_COEFF_FLOOR_ENV = None if _COEFF_FLOOR_ENV is None else float(_COEFF_FLOOR_ENV)
 
 
 def body_aware_alpha_init(alpha_init, sdf_cc, eps, h, *,
@@ -170,6 +178,10 @@ def body_aware_alpha_init(alpha_init, sdf_cc, eps, h, *,
 
 class TwoPhaseSolver(FluidSolver):
     """Variable-density two-phase solver (water + real air) via VOF."""
+
+    # Per-step memo for :meth:`_mu0_cc`.  Class-level default so the getter is
+    # safe during __init__, before any instance attribute is bound.
+    _mu0_cc_cache = None
 
     def __init__(self, pars, dtype=None, custom_update=None, compute_forces=True):
         # Two-phase default Poisson: mgcg (multigrid-preconditioned CG) is
@@ -537,8 +549,37 @@ class TwoPhaseSolver(FluidSolver):
         kernel's staggered-face value.  This matches the old cuda_kernels
         path and is more robust for large bodies at an angle (the
         staggered-face SDF can differ from the face-averaged cell-centred
-        SDF near sharp edges)."""
-        return self.composite_body.mu_funcs(self.composite_body.sdf_val)[0]
+        SDF near sharp edges).
+
+        Memoised within a step.  ``mu_funcs`` costs ~4 ms per call at 14 M
+        cells (its narrow band is boolean-mask indexing, so it pays a
+        ``nonzero`` + gather + scatter over the full grid), and the callers
+        ask for the SAME tensor 4-5 times per step:
+        ``_rescale_kernel_coeffs_two_phase`` alone evaluates it once for
+        ``_alpha_fluid_cc`` and again inside its per-direction loop, which is
+        3 more identical full-grid evaluations.  The result depends only on
+        ``composite_body.sdf_val``, which is fixed for the whole step once
+        ``composite_body.update`` has run.
+
+        The cache is guarded twice over, because the streaming path writes
+        ``sdf_val`` from a native kernel: ``_invalidate_mu0_cc`` drops it at
+        the top of every step, and the stored ``(data_ptr, _version)`` stamp
+        drops it again if the buffer is reallocated or mutated in place
+        mid-step.  A stale μ₀ would silently mis-scale the Poisson
+        coefficients, so neither guard is relied on alone.
+        """
+        sdf = self.composite_body.sdf_val
+        stamp = (sdf.data_ptr(), sdf._version, tuple(sdf.shape))
+        cached = self._mu0_cc_cache
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        mu0 = self.composite_body.mu_funcs(sdf)[0]
+        self._mu0_cc_cache = (stamp, mu0)
+        return mu0
+
+    def _invalidate_mu0_cc(self):
+        """Drop the per-step ``_mu0_cc`` memo (see that method)."""
+        self._mu0_cc_cache = None
 
     def _kernel_blend_velocities(self, vels):
         """Apply the air-transparent identity ``u0 := a*u0 + (1-a)*u'`` to the
@@ -626,20 +667,28 @@ class TwoPhaseSolver(FluidSolver):
         # dt/ρ_water for dt=1e-3, but at finer grids (dt∝h) it clipped even the
         # open-water coefficient.  At N=96, dt/ρ_water=7.05e-7, producing the
         # observed pressure/force factor 7.05e-7/1e-6 ≈ 0.707.
-        import os
-        _floor_str = os.environ.get("LILYTORCH_COEFF_FLOOR")
-        if _floor_str is not None:
-            _floor = float(_floor_str)
-        elif tp.rho_water == tp.rho_air:
-            # Preserve the exact uniform-density reduction to FluidSolver,
-            # whose BDIM coefficient is not floored.
-            _floor = 0.0
-        else:
-            _floor = min(1e-6, dt / tp.rho_water)
+        _floor = self._coeff_floor
         if _floor > 0.0:
             out = tuple(torch.clamp(c, min=_floor) if isinstance(c, torch.Tensor) else c
                         for c in out)
         return tuple(out)
+
+    @property
+    def _coeff_floor(self):
+        """Coefficient floor for :meth:`_rescale_kernel_coeffs_two_phase`.
+
+        The ``LILYTORCH_COEFF_FLOOR`` override is read once at import
+        (``_COEFF_FLOOR_ENV``) rather than per step; the dt-dependent default
+        stays computed here so an adaptive dt still scales it.
+        """
+        if _COEFF_FLOOR_ENV is not None:
+            return _COEFF_FLOOR_ENV
+        tp = self.two_phase
+        if tp.rho_water == tp.rho_air:
+            # Preserve the exact uniform-density reduction to FluidSolver,
+            # whose BDIM coefficient is not floored.
+            return 0.0
+        return min(1e-6, float(self.dt) / tp.rho_water)
 
     def project(self, *args, ch=None, cv=None, cw=None, ch_cc=None, **kwargs):
         """Fused path only: blend the BDIM velocity with u' (air-transparent
@@ -706,6 +755,8 @@ class TwoPhaseSolver(FluidSolver):
         (``|sdf| < 2h``) intact.  The base solver zeros at ``sdf < 0``, which
         for thin bodies (thickness ~ band width) removes the interior half of
         the band and destroys emergent buoyancy."""
+        # New step, new body pose: the μ₀ memo from the previous step is stale.
+        self._invalidate_mu0_cc()
         self.composite_body.update(t, iteration, dt=self.dt)
         if self._needs_python_mu_normals():
             self._recompute_mu_normals()

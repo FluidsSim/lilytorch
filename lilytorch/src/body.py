@@ -3079,6 +3079,39 @@ class MultiAnimatBodies(Body):
             sdf_folder = os.path.dirname(animat.sdf)
             morphology_links = getattr(getattr(animat, "morphology", None), "links", None)
 
+            # ---- fluid-force readout: off for FIXED (welded) animats -------
+            # A ``SpawnMode.FIXED`` animat is welded to the world, so no load
+            # the fluid puts on it can move it — the eulerian readout is
+            # computed, logged and consumed by nothing.  It is not free: it
+            # sweeps the body's whole AABB every step, and for a scene-scale
+            # static body (the salamandra pool's ramp, AABB ~40 % of the grid)
+            # that was 29.5 ms of a 135 ms step, 22 %.  Skipping it leaves the
+            # body fully immersed — it is still streamed into the union SDF and
+            # still enforces no-slip; only its own force slot is skipped, and
+            # that slot reads exactly 0 (the kernel's out buffer is zeroed
+            # every step).
+            #
+            # Only FIXED qualifies: every other SpawnMode still leaves DOFs the
+            # load can drive.  ``spawn.extras.fluid_force_readout`` overrides,
+            # for the case where the load on a fixed structure IS the quantity
+            # of interest.
+            _spawn = getattr(animat, "spawn", None)
+            _mode = getattr(_spawn, "mode", None)
+            # Compare by value, not by importing SpawnMode: body.py must not
+            # take a hard farms_core dependency for a per-animat flag.
+            _is_fixed = str(getattr(_mode, "value", _mode)).lower() == "fixed"
+            _override = dict(getattr(_spawn, "extras", None) or {}).get(
+                "fluid_force_readout")
+            if _override is not None:
+                animat_force_readout = bool(_override)
+            else:
+                animat_force_readout = not _is_fixed
+            if _is_fixed:
+                print(f"  '{animat.sdf}': spawn mode is FIXED -> fluid force "
+                      f"readout "
+                      f"{'KEPT (extras override)' if animat_force_readout else 'SKIPPED'}"
+                      f" (the body stays immersed either way).")
+
             # ---- link identity resolution (BY NAME, never by position) ----
             # The index stored in ``body_ids`` addresses the FARMS *sensor*
             # link arrays (poses/velocities in BDIMhandler, ``data2xfrc`` for
@@ -3532,6 +3565,7 @@ class MultiAnimatBodies(Body):
                 for body in (self._link_composite_body(
                         link_bodies, link_name, animat.sdf, initial_pose, eps)
                         or link_bodies):
+                    body.fluid_force_readout = animat_force_readout
                     self.bodies.append(body)
                     self.body_ids.append([animat_i, link_id])
 

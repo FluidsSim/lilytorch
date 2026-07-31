@@ -1380,6 +1380,32 @@ class PlottingMixin:
     def plotting_debug(self, u, v, p, iteration, check_termination=True):
         return self.plotting_and_saving(u, v, p, iteration, check_termination=check_termination)
 
+    def _log_domain_crossings(self, mask, iteration):
+        """Report each body entering / leaving the fluid box.
+
+        With ``terminate_on_body_exit`` off, a body outside the box is
+        streamed as a zero-size AABB: it neither disturbs the flow nor
+        receives a fluid load.  That is the intended physics only when the
+        body is genuinely out of the fluid (an amphibious animat on dry land
+        above the box); if it leaves through a wet face it is silently
+        force-free instead, so make every crossing visible.
+        """
+        prev = getattr(self, "_domain_inside_prev", None)
+        if prev is None or prev.shape != mask.shape:
+            self._domain_inside_prev = mask.clone()
+            return
+        changed = torch.nonzero(mask != prev, as_tuple=False).flatten()
+        for body_i in changed.tolist():
+            logger.info(
+                "Body %d %s the fluid domain at iteration %d (com=%s)",
+                body_i,
+                "entered" if bool(mask[body_i]) else "left",
+                iteration,
+                [round(float(c), 4)
+                 for c in self.composite_body.com_pos[body_i]],
+            )
+        self._domain_inside_prev = mask.clone()
+
     def check_termination(self, iteration, u, v, p):
         # NaN in any velocity or pressure field
         has_nan = (torch.isnan(u).any() or torch.isnan(v).any()
@@ -1392,14 +1418,21 @@ class PlottingMixin:
                 terminate = True
         else:
             if hasattr(self.composite_body, "com_pos"):
-                    terminate = not self.inside(self.composite_body.com_pos)
+                    com_pos = self.composite_body.com_pos
+                    mask = self.inside_mask(com_pos)
+                    terminate = (
+                        bool(~torch.all(mask))
+                        and self.terminate_on_body_exit
+                    )
                     if terminate:
                         logger.warning(
                             "Termination condition met: body exited domain "
                             "(com_pos=%s, domain x=[%s, %s] y=[%s, %s])",
-                            self.composite_body.com_pos.tolist(),
+                            com_pos.tolist(),
                             self.xmin, self.xmax, self.ymin, self.ymax,
                         )
+                    elif not self.terminate_on_body_exit:
+                        self._log_domain_crossings(mask, iteration)
             else:
                 terminate = False
         return terminate
