@@ -937,26 +937,32 @@ class BDIMhandler:
 
         for b, body in enumerate(comp.bodies):
             m = body._stream_meta
+            # Compose with the geom's own pose within the link, in BOTH
+            # dimensions.  A geom's <pose> is relative to the link frame, so
+            # skipping this puts the geom on the link origin: 8 of
+            # salamander_v5's 17 collision geoms carry in-plane offsets of up
+            # to 3 mm on ~20 mm links.  The per-step assembly composes
+            # ``local_lt``/``local_lr`` dimension-agnostically already, so only
+            # populating them was ever 3-D specific.  2-D takes the in-plane
+            # block: an out-of-plane tilt has no 2-D cross-section.
+            lp = getattr(body, 'local_pose', None)
+            if lp is not None:
+                lp_t = torch.as_tensor(
+                    lp, dtype=self.dtype, device=self.device)
+                local_lt[b] = lp_t[:D]
+                local_lr[b] = torch.as_tensor(
+                    Rotation.from_euler(
+                        'xyz', lp_t[3:].detach().cpu().numpy(),
+                    ).as_matrix()[:D, :D],
+                    dtype=self.dtype, device=self.device,
+                )
             if D == 3:
-                # Compose with the body's local collision pose (mesh links).
-                lp = getattr(body, 'local_pose', None)
-                if lp is not None:
-                    lp_t = torch.as_tensor(
-                        lp, dtype=self.dtype, device=self.device)
-                    local_lt[b] = lp_t[:3]
-                    local_lr[b] = torch.as_tensor(
-                        Rotation.from_euler(
-                            'xyz', lp_t[3:].detach().cpu().numpy(),
-                        ).as_matrix(),
-                        dtype=self.dtype, device=self.device,
-                    )
                 sx, sy, sz = m['bx'], m['by'], m['bz']
                 sdf_lo[b] = torch.stack((sx[0], sy[0], sz[0]))
                 sdf_hi[b] = torch.stack((sx[-1], sy[-1], sz[-1]))
             else:
-                # 2-D rigid-body links have identity local frames (lt=0, lr=I,
-                # set above).  Prefer the tight contour-based AABB for mesh
-                # bodies whose SDF table is padded far beyond the BDIM band.
+                # Prefer the tight contour-based AABB for mesh bodies whose
+                # SDF table is padded far beyond the BDIM band.
                 if 'local_aabb_lo' in m:
                     sdf_lo[b] = m['local_aabb_lo'].to(
                         dtype=self.dtype, device=self.device)
@@ -1136,21 +1142,28 @@ class BDIMhandler:
     #  Python body-update helpers  (ported back from cuda_kernels)
     # ==================================================================
 
-    def _compose_body_frame_3d(self, body, urdf_pos, R):
-        """Compose the MuJoCo link pose with the body's local collision pose."""
+    def _compose_body_frame(self, body, urdf_pos, R):
+        """Compose the link pose with the geom's own pose within the link.
+
+        Dimension-agnostic: a geom's ``<pose>`` is given relative to the link
+        frame in both 2-D and 3-D, so both must apply it.  2-D uses the
+        in-plane block, an out-of-plane tilt having no 2-D cross-section.
+        """
         local_pose = getattr(body, "local_pose", None)
         if local_pose is None:
             return urdf_pos, R
+        D = self.ndim
 
         local_translation = getattr(body, "_local_translation_t", None)
         local_rotation = getattr(body, "_local_rotation_t", None)
         if local_translation is None or local_rotation is None:
             local_pose_np = np.asarray(local_pose, dtype=self.dtype_np)
             local_translation = torch.tensor(
-                local_pose_np[:3], device=self.device, dtype=self.dtype,
+                local_pose_np[:D], device=self.device, dtype=self.dtype,
             )
             local_rotation = torch.tensor(
-                Rotation.from_euler("xyz", local_pose_np[3:]).as_matrix().astype(self.dtype_np),
+                Rotation.from_euler("xyz", local_pose_np[3:])
+                .as_matrix().astype(self.dtype_np)[:D, :D],
                 device=self.device, dtype=self.dtype,
             )
             body._local_translation_t = local_translation
@@ -1313,18 +1326,15 @@ class BDIMhandler:
             ang_vel  = ang_vels_t[animat_id][link_id]
 
             # ── Body frame + AABB descriptor ────────────────────────
-            # 2-D rigid-body links collapse to identity local frames, so
-            # body_pos = urdf_pos, body_rot = R.  3-D composes the MuJoCo
-            # link pose with the body's local collision pose.
+            # Both dimensions compose the link pose with the geom's own pose
+            # within the link; only the AABB helper differs.
+            body_pos, body_rot = self._compose_body_frame(body, urdf_pos, R)
             if D == 2:
-                body_pos, body_rot = urdf_pos, R
                 aabb = BDIMhandler._body_aabb_local_2d(
                     body, body_rot, body_pos,
                     comp.x, comp.y, h_grid, gs, pad=3,
                 )
             else:
-                body_pos, body_rot = self._compose_body_frame_3d(
-                    body, urdf_pos, R)
                 aabb = BDIMhandler._body_aabb_indices(
                     body, body_rot, body_pos,
                     comp.x, comp.y, comp.z, h_grid, gs, pad=3,
