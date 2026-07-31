@@ -990,9 +990,10 @@ class BDIMhandler:
             'inv_h':        1.0 / float(comp.h),
             'gs':           torch.tensor(gs, dtype=torch.int64, device=self.device),
             'pad':          8,
-            # numpy mirrors used by the host-side per-step assembly.  2-D
-            # stores zeros/identity for local_lt/lr so the unified compose
-            # einsum is a bit-exact no-op there (R@I = R, urdf + R@0 = urdf).
+            # numpy mirrors used by the host-side per-step assembly.  Both
+            # dimensions carry a real local_lt/lr; a geom with no pose keeps
+            # zeros/identity, for which the compose einsum is a bit-exact
+            # no-op (R@I = R, urdf + R@0 = urdf).
             'body_ids_np':     body_ids.numpy(),
             'local_lt_np':     local_lt.detach().cpu().numpy().copy(),
             'local_lr_np':     local_lr.detach().cpu().numpy().copy(),
