@@ -379,10 +379,25 @@ class TwoPhaseSolver(FluidSolver):
         # produces on its OWN -- i.e. consistent momentum adds nothing to the
         # carve's own, still-unexplained blow-up (onset it 2738 regardless of
         # transport scheme, timestep or coefficient formulation).
-        if self._cm_flux_scheme not in (0, 1, 2):
+        if self._cm_flux_scheme not in (0, 2):
+            extra = ""
+            if self._cm_flux_scheme == 1:
+                extra = (
+                    "\nScheme 1 (van-Leer density + UPWIND velocity) was "
+                    "removed.  It existed to answer one question -- is "
+                    "consistent momentum stabilising because of the SHARED "
+                    "flux, or merely because first-order upwinding is "
+                    "diffusive?  If diffusion were the cause, 1 and 2 would "
+                    "have reverted toward the stock growth rate of 7.36 /s; "
+                    "measured, they are 1.20 and 1.12.  The shared flux is the "
+                    "cause, the experiment is finished, and 2 supersedes 1 by "
+                    "limiting the velocity as well at the same cost.  Use 2."
+                )
             raise ValueError(
-                "two_phase.consistent_momentum_flux must be 0, 1 or 2, got "
-                f"{self._cm_flux_scheme}."
+                "two_phase.consistent_momentum_flux must be 0 (first-order "
+                "donor cell, the reference the CUDA port is validated against) "
+                f"or 2 (van-Leer limited, the production default), got "
+                f"{self._cm_flux_scheme}.{extra}"
             )
         # Consistent transport REPLACES the momentum advection outright, so
         # ``solver.convection_method`` stops having any effect.  Say so out

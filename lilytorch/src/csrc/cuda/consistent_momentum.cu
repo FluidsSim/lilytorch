@@ -22,17 +22,27 @@
 //  deleted python path used; the fixed-point cycles are not ported.
 //
 //  ``flux_scheme`` picks the reconstruction of the SHARED mass flux:
-//    0 = first-order donor cell (the recovered reference).  Stable, but its
-//        numerical diffusion (~|u|h/2) damps resolved surface waves.
-//    1 = Weymouth & Yue Courant-corrected van-Leer donor for the density.
-//        Algebraically the SAME face value ``cvof_sweep`` uses: rho is affine
-//        in alpha and the van-Leer slope is linear in it, so limiting rho and
-//        limiting alpha agree exactly.  The interface keeps the stock VOF's
-//        sharpness while the flux stays shared with the momentum.
-//    2 = as 1, plus a van-Leer MUSCL reconstruction of the ADVECTED velocity
-//        (removes the momentum's own first-order diffusion).
-//  Level >=1 is bounded for CFL <= 1 per direction; this update is unsplit, so
-//  in 3-D keep the per-direction Courant number comfortably below 1/3.
+//    0 = first-order donor cell.  This is the recovered python reference the
+//        port is validated against, so it is kept as the parity oracle -- but
+//        it is NOT usable in production: its numerical diffusion (~|u|h/2)
+//        damps resolved surface waves flat.
+//    2 = Weymouth & Yue Courant-corrected van-Leer donor for the density
+//        (algebraically the SAME face value ``cvof_sweep`` uses -- rho is
+//        affine in alpha and the van-Leer slope is linear in it, so limiting
+//        rho and limiting alpha agree exactly), PLUS a van-Leer MUSCL
+//        reconstruction of the ADVECTED velocity.  The production default.
+//
+//  Scheme 1 (limited density, upwind velocity) was REMOVED as an option.  Its
+//  job was to answer whether the stabilisation comes from the SHARED flux or
+//  merely from upwind diffusion: if diffusion were the cause, 1 and 2 would
+//  have reverted toward stock's 7.36 /s growth; measured they are 1.20 and
+//  1.12.  The question is settled and 2 supersedes 1 at the same step cost.
+//  Its code path survives inside scheme 2, which uses exactly this density
+//  reconstruction -- only the config option is gone.
+//
+//  The limited path is bounded for CFL <= 1 per direction; this update is
+//  unsplit, so in 3-D keep the per-direction Courant number comfortably below
+//  1/3.
 //
 //  MAC convention: q[k] along axis d is the face LEFT of cell k, so
 //  F[d][0] is outside the domain and is defined to be 0 (matching the
@@ -389,8 +399,12 @@ static void consistent_momentum_3d_cuda(
     double rho_water, double rho_air, double dt, double h,
     double gx, double gy, double gz, int64_t flux_scheme)
 {
-    TORCH_CHECK(flux_scheme >= 0 && flux_scheme <= 2,
-                "consistent_momentum_3d: flux_scheme must be 0, 1 or 2, got ",
+    TORCH_CHECK(flux_scheme == 0 || flux_scheme == 2,
+                "consistent_momentum_3d: flux_scheme must be 0 (donor "
+                "cell, the validation reference) or 2 (van-Leer limited, "
+                "the production default).  Scheme 1 was removed: it was "
+                "the experiment separating the shared flux from upwind "
+                "diffusion, and 2 supersedes it at the same cost.  Got ",
                 flux_scheme);
     TORCH_CHECK(alpha.dim() == 3, "consistent_momentum_3d: alpha must be 3-D");
     TORCH_CHECK(alpha.is_cuda() && u.is_cuda() && rho_new.is_cuda(),

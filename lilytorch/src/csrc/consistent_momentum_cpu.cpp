@@ -285,8 +285,12 @@ void consistent_momentum_3d_cpu(
     double rho_water, double rho_air, double dt, double h,
     double gx, double gy, double gz, int64_t flux_scheme)
 {
-    TORCH_CHECK(flux_scheme >= 0 && flux_scheme <= 2,
-                "consistent_momentum_3d: flux_scheme must be 0, 1 or 2, got ",
+    TORCH_CHECK(flux_scheme == 0 || flux_scheme == 2,
+                "consistent_momentum_3d: flux_scheme must be 0 (donor "
+                "cell, the validation reference) or 2 (van-Leer limited, "
+                "the production default).  Scheme 1 was removed: it was "
+                "the experiment separating the shared flux from upwind "
+                "diffusion, and 2 supersedes it at the same cost.  Got ",
                 flux_scheme);
     TORCH_CHECK(!alpha.device().is_cuda(),
                 "consistent_momentum_3d CPU: expected CPU tensors");
