@@ -210,6 +210,7 @@ class TwoPhaseSolver(FluidSolver):
         # agree with the face-averaged cell-centred μ₀ (e.g. large bodies at
         # an angle like the amphibious ramp).
         self._init_two_phase(tp_cfg)
+        self._rescale_jcap_tol(solver_cfg=pars.get("solver", {}))
 
         # ── Align body eps with the solver's Maertens-Weymouth eps ──────
         # The BDIM kernel reads comp.eps for its mu0 computation; comp.mu_funcs
@@ -473,6 +474,45 @@ class TwoPhaseSolver(FluidSolver):
     # most accurate and gives Cz≈1 on the drop-sphere (Weymouth & Yue 2011). A
     # well-balanced p_rgh solve (cleaner dynamic pressure, fewer parasitic
     # interface currents) is a separate follow-up.
+
+    def _rescale_jcap_tol(self, solver_cfg):
+        """Carry the degenerate-cell threshold with the coefficient scale.
+
+        ``poisson_jcap_tol`` freezes a Poisson row whose diagonal falls below
+        it (WaterLily's ``iszero(D)`` guard).  It is an ABSOLUTE number, and
+        its default was calibrated against the old ``dt*mu0/rho`` coefficient:
+        healthy water gave ``J = 6*dt/rho_water = 6e-6`` at dt = 1e-3, so the
+        1e-7 default sat at ~1.7 % of a healthy diagonal.
+
+        The WaterLily pressure-impulse scaling multiplies every coefficient by
+        ``rho_water/dt`` -- a factor of 1e6 at that timestep -- so the same
+        1e-7 became 1.7e-8 of healthy and the guard silently stopped firing.
+        Near-dead cells inside a body (measured: J = 7e-6 against a healthy
+        6.0, with one connected face out of six) were then solved rather than
+        frozen, and ``p = h^2*div/J`` turned them into 1e7 Pa.  That pressure
+        reaches the band quadrature: peak load on the salamandra went to
+        127.9 N with 150.8 N single-step jumps, on a 1.3 kg robot.  Rescaling
+        the threshold with the coefficient returns it to 4.7 N / 0.38 N.
+
+        Scaling it here rather than asking configs for a magic number is the
+        point: an absolute tolerance left behind by a rescale is exactly how
+        this broke, and a hand-set value would break the same way at the next
+        change of dt.  An explicit ``poisson_jcap_tol`` still wins.
+        """
+        if "poisson_jcap_tol" in solver_cfg:
+            return                       # user asked for a specific value
+        tp = self.two_phase
+        if tp.rho_water == tp.rho_air and self._rho_solid is None:
+            return                       # single-phase reduction: not rescaled
+        ps = getattr(self, "poisson_solver", None)
+        if ps is None or not hasattr(ps, "jcap_tol"):
+            return
+        factor = float(tp.rho_water) / float(self.dt)
+        ps.jcap_tol = float(ps.jcap_tol) * factor
+        print(f"TwoPhaseSolver: poisson_jcap_tol scaled by rho_water/dt = "
+              f"{factor:.3g} to match the WaterLily coefficient scaling -> "
+              f"{ps.jcap_tol:.3g} (healthy two-phase diagonal is ~6).",
+              flush=True)
 
     def _alpha_face(self, d):
         """Water fraction ``alpha`` on the staggered *d*-face grid (full grid;
