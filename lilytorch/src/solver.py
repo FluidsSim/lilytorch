@@ -183,21 +183,28 @@ class FluidSolver(PlottingMixin):
         self.eps  = solver.get("eps_multiplier",
                                 torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
 
-        # BDIM2 mu0-weighted Poisson coefficient.  When True (default) the
-        # variable-density coefficient is ``dt*mu0/rho_eff`` (Maertens &
-        # Weymouth 2015), which sharpens the body interface but makes the
-        # Poisson operator degenerate inside/near the body.  When False the
-        # coefficient is the plain ``dt/rho_eff`` (no mu0 numerator), keeping
-        # the operator non-degenerate — required for stable multibody
-        # swimmers where inter-link velocity seams create divergence in
-        # low-mu0 cells the degenerate solve cannot remove.
+        # BDIM2 mu0-weighted Poisson coefficient.  In FluidSolver, True
+        # (default) writes ``dt*mu0/rho`` and False writes ``dt/rho``.  The
+        # two-phase subclass always needs ``dt*mu0/rho_eff``; there this flag
+        # selects whether mu0 is recovered from the directly sampled
+        # staggered-face kernel field (True) or reconstructed by averaging a
+        # cell-centred SDF field (False).  See
+        # TwoPhaseSolver._rescale_kernel_coeffs_two_phase.
         self.bdim_mu0_projection = bool(solver.get("bdim_mu0_projection", True))
         # Maertens–Weymouth body-velocity-divergence RHS correction. Keeps the
         # mu0-weighted projection consistent for overlapping/deforming bodies
         # (no-op for single rigid bodies). See _mw_body_div_correction.
         self._bdim_body_div_correction = bool(
             solver.get("bdim_body_div_correction", False))
-
+        # A Cartesian domain wall and an immersed body can occupy the same
+        # staggered face (for example, a body entering through the edge of a
+        # deliberately cropped fluid window).  A plain post-BDIM Dirichlet
+        # write replaces the imposed body velocity by the wall value and
+        # creates O(u_b/h) divergence in a row whose BDIM pressure coefficient
+        # tends to zero.  Blend the two boundary data with the same zeroth
+        # kernel moment as the momentum equation when explicitly requested.
+        self.bdim_wall_consistent_bc = bool(
+            solver.get("bdim_wall_consistent_bc", False))
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
         self.starting_time           = self.starting_iteration * self.dt
@@ -549,6 +556,16 @@ class FluidSolver(PlottingMixin):
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
             recycle_k       = solver.get("poisson_recycle_k", 0),
+            # Per-face pressure BC, same face order as the velocity BCs:
+            #   solver.poisson_bc_faces: [xmin, xmax, ymin, ymax, zmin, zmax]
+            # entries "N" (zero-gradient, the default everywhere) or "D"
+            # (p = 0 on that face).  A "D" face is what makes an OPEN boundary
+            # actually open: pairing it with a velocity "N" on the same face is
+            # the standard outflow pair, and the velocity half alone does not
+            # let the projection drive flux through the wall.
+            # p carries hydrostatic pressure, so only use "D" on a face that is
+            # ~uniform atmospheric (an air face) — see _set_pressure_bc.
+            pressure_bc     = solver.get("poisson_bc_faces", None),
         )
         # Degenerate-cell freeze threshold. Cells with |diagonal| < jcap_tol are
         # frozen (iD=0, residual zeroed) — WaterLily's iszero(D) guard. The
@@ -1086,6 +1103,72 @@ class FluidSolver(PlottingMixin):
         mu0   = 0.5 * (1.0 + deps + torch.sin(torch.pi * deps) / torch.pi)
         return (1.0 - mu0) * div_b
 
+    def _apply_bdim_wall_bcs(self, vels):
+        """Make wall-normal Dirichlet data consistent with immersed forcing.
+
+        On a domain face occupied partly by an immersed body, apply
+
+            u_wall = mu0 * g_wall + (1 - mu0) * u_body.
+
+        This is the boundary counterpart of the BDIM velocity meta-equation.
+        It is deliberately applied immediately before forming the projection
+        RHS: the fused pre-projection BC pass and the two-phase air mask both
+        run earlier and may otherwise overwrite the body value.
+        """
+        if not self.bdim_wall_consistent_bc or self.composite_body is None:
+            return
+
+        comp = self.composite_body
+        # ``self.eps`` is commonly a 0-D CUDA tensor.  Re-converting it here
+        # would synchronise the device once per time step.
+        eps = self._cached_float('eps', self.eps)
+        axes = self._bdim_axis_names
+        bc_types = self.adv_diff_solver._bc_types
+        bc_values = self.adv_diff_solver._bc_values
+
+        for d, (vel, ax) in enumerate(zip(vels, axes)):
+            sdf = getattr(comp, f"sdf_val_{ax}", None)
+            body_vel = getattr(comp, f"body_{ax}", None)
+            if sdf is None or body_vel is None:
+                continue
+            for side, off in ((0, 1), (1, -1)):
+                face = 2 * d + side
+                if bc_types[d][face] != "D":
+                    continue
+                sl = [slice(None)] * self.ndim
+                sl[d] = off
+                sl = tuple(sl)
+                deps = (sdf[sl] / eps).clamp(-1.0, 1.0)
+                mu0 = 0.5 * (
+                    1.0 + deps + torch.sin(torch.pi * deps) / torch.pi
+                )
+                g = float(bc_values[d][face])
+                vel[sl].copy_(mu0 * g + (1.0 - mu0) * body_vel[sl])
+
+    def _apply_pressure_bc_to_face_coeffs(self, face_arrs):
+        """Remove coefficients for fluxes absent under pressure Neumann BCs.
+
+        The pressure ghost equals its adjacent interior value on a Neumann
+        wall, hence that face contributes exactly zero to ``div(c grad p)``.
+        Keeping its coefficient in the smoother diagonal creates a fictitious
+        live row: this is harmless under ordinary coefficients (only extra
+        under-relaxation), but catastrophic when it is the sole nonzero BDIM
+        face of an otherwise solid cell.  Mutating the boundary planes is also
+        safe for the velocity correction because the normal pressure gradient
+        on those same faces is zero.
+        """
+        # Older/custom Poisson backends have no per-face pressure-BC mask;
+        # their historical contract is all-Neumann.
+        dirichlet_mask = getattr(self.poisson_solver, 'pressure_bc_mask', 0)
+        for d, cf in enumerate(face_arrs):
+            for side, off in ((0, 0), (1, -1)):
+                face = 2 * d + side
+                if (dirichlet_mask >> face) & 1:
+                    continue
+                sl = [slice(None)] * self.ndim
+                sl[d] = off
+                cf[tuple(sl)].zero_()
+
     def project(self, u, v, p, w_vel=None, w=1.0, *,
                 ch=None, cv=None, cw=None, ch_cc=None, body_div_corr=None):
         """Pressure-Poisson projection.
@@ -1114,6 +1197,9 @@ class FluidSolver(PlottingMixin):
             (default) the FFT path falls back to a single scalar
             coefficient (constant-density behaviour).
         """
+
+        wall_vels = (u, v) if self.ndim == 2 else (u, v, w_vel)
+        self._apply_bdim_wall_bcs(wall_vels)
 
         coeff = w * self.dt / self.rho
 
@@ -1231,11 +1317,13 @@ class FluidSolver(PlottingMixin):
                 p0 = torch.zeros_like(p)
 
             if self.ndim == 2:
+                solve_faces = (ch[1:, 1:-1], cv[1:-1, 1:])
+                self._apply_pressure_bc_to_face_coeffs(solve_faces)
                 p, _ = _poisson_solve(
                     div,
                     p0,
-                    ch=ch[1:, 1:-1],
-                    cv=cv[1:-1, 1:],
+                    ch=solve_faces[0],
+                    cv=solve_faces[1],
                     pre_scaled=_pre_scaled,
                 )
                 del div                   # T3a: free interior RHS before correction
@@ -1258,12 +1346,18 @@ class FluidSolver(PlottingMixin):
                 # path stores ch/cv/cw directly at the staggered face-grid
                 # size so the Poisson solver receives contiguous arrays.
                 _face_grid = ch.shape[0] < u.shape[0]
+                solve_faces = (
+                    ch if _face_grid else ch[1:, 1:-1, 1:-1],
+                    cv if _face_grid else cv[1:-1, 1:, 1:-1],
+                    cw if _face_grid else cw[1:-1, 1:-1, 1:],
+                )
+                self._apply_pressure_bc_to_face_coeffs(solve_faces)
                 p, _ = _poisson_solve(
                     div,
                     p0,
-                    ch=(ch  if _face_grid else ch[1:, 1:-1, 1:-1]),
-                    cv=(cv  if _face_grid else cv[1:-1, 1:, 1:-1]),
-                    cw=(cw  if _face_grid else cw[1:-1, 1:-1, 1:]),
+                    ch=solve_faces[0],
+                    cv=solve_faces[1],
+                    cw=solve_faces[2],
                     pre_scaled=_pre_scaled,
                 )
                 del div                   # T3a: free interior RHS before correction

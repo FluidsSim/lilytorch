@@ -35,15 +35,21 @@ namespace lilytorch_kernels {
 
 template <typename scalar_t>
 static inline void apply_neumann_bc_2d_cpu(scalar_t* p, int Nx, int Ny) {
-    // Copy interior-adjacent rows into ghost rows on all 4 faces.
+    // Copy interior-adjacent rows into ghost rows on all 4 faces, negating on
+    // Dirichlet faces (see common/poisson_gauge.h for the sign convention).
     // Dim order: x-faces then y-faces so edge/corner ghosts get filled.
+    namespace pg = lilytorch_kernels::poisson;
+    const scalar_t sxlo = (scalar_t)pg::pressure_bc_sign(0);
+    const scalar_t sxhi = (scalar_t)pg::pressure_bc_sign(1);
+    const scalar_t sylo = (scalar_t)pg::pressure_bc_sign(2);
+    const scalar_t syhi = (scalar_t)pg::pressure_bc_sign(3);
     const int stride = Ny + 2;
     // x-faces
     at::parallel_for(0, Ny, 1, [&](int64_t start, int64_t end) {
         for (int64_t j = start; j < end; ++j) {
             const int jj = (int)j + 1;
-            p[jj]                     = p[stride + jj];        // p[0,j]   = p[1,j]
-            p[(Nx+1)*stride + jj]    = p[Nx*stride + jj];      // p[Nx+1,j]= p[Nx,j]
+            p[jj]                     = sxlo * p[stride + jj];   // p[0,j]   = p[1,j]
+            p[(Nx+1)*stride + jj]    = sxhi * p[Nx*stride + jj]; // p[Nx+1,j]= p[Nx,j]
         }
     });
     // y-faces
@@ -51,14 +57,21 @@ static inline void apply_neumann_bc_2d_cpu(scalar_t* p, int Nx, int Ny) {
         for (int64_t i = start; i < end; ++i) {
             const int ii = (int)i + 1;
             const int base = ii * stride;
-            p[base]          = p[base + 1];          // p[i,0]    = p[i,1]
-            p[base + Ny + 1] = p[base + Ny];         // p[i,Ny+1] = p[i,Ny]
+            p[base]          = sylo * p[base + 1];   // p[i,0]    = p[i,1]
+            p[base + Ny + 1] = syhi * p[base + Ny];  // p[i,Ny+1] = p[i,Ny]
         }
     });
 }
 
 template <typename scalar_t>
 static inline void apply_neumann_bc_3d_cpu(scalar_t* p, int Nx, int Ny, int Nz) {
+    namespace pg = lilytorch_kernels::poisson;
+    const scalar_t sxlo = (scalar_t)pg::pressure_bc_sign(0);
+    const scalar_t sxhi = (scalar_t)pg::pressure_bc_sign(1);
+    const scalar_t sylo = (scalar_t)pg::pressure_bc_sign(2);
+    const scalar_t syhi = (scalar_t)pg::pressure_bc_sign(3);
+    const scalar_t szlo = (scalar_t)pg::pressure_bc_sign(4);
+    const scalar_t szhi = (scalar_t)pg::pressure_bc_sign(5);
     const int si = (Ny + 2) * (Nz + 2);
     const int sj = Nz + 2;
     // x-faces
@@ -67,8 +80,8 @@ static inline void apply_neumann_bc_3d_cpu(scalar_t* p, int Nx, int Ny, int Nz) 
             const int j = (int)(idx / Nz) + 1;
             const int k = (int)(idx % Nz) + 1;
             const int jk = j * sj + k;
-            p[jk]              = p[si + jk];
-            p[(Nx+1)*si + jk]  = p[Nx*si + jk];
+            p[jk]              = sxlo * p[si + jk];
+            p[(Nx+1)*si + jk]  = sxhi * p[Nx*si + jk];
         }
     });
     // y-faces
@@ -77,8 +90,8 @@ static inline void apply_neumann_bc_3d_cpu(scalar_t* p, int Nx, int Ny, int Nz) 
             const int i = (int)(idx / Nz) + 1;
             const int k = (int)(idx % Nz) + 1;
             const int base = i * si + k;
-            p[base]              = p[base + sj];
-            p[base + (Ny+1)*sj]  = p[base + Ny*sj];
+            p[base]              = sylo * p[base + sj];
+            p[base + (Ny+1)*sj]  = syhi * p[base + Ny*sj];
         }
     });
     // z-faces
@@ -87,8 +100,8 @@ static inline void apply_neumann_bc_3d_cpu(scalar_t* p, int Nx, int Ny, int Nz) 
             const int i = (int)(idx / Ny) + 1;
             const int j = (int)(idx % Ny) + 1;
             const int base = i * si + j * sj;
-            p[base]          = p[base + 1];
-            p[base + Nz + 1] = p[base + Nz];
+            p[base]          = szlo * p[base + 1];
+            p[base + Nz + 1] = szhi * p[base + Nz];
         }
     });
 }

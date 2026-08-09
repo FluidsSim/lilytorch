@@ -18,6 +18,7 @@
 #include <torch/all.h>
 #include <torch/library.h>
 #include <c10/util/ArrayRef.h>
+#include "common/poisson_gauge.h"
 
 extern "C" {
 PyObject* PyInit__C(void) {
@@ -511,6 +512,15 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int nsmoothing, int max_vcycles, float tol, int smoother_id"
         ") -> (Tensor, int)");
 
+    // ---- per-face pressure boundary condition --------------------------
+    // Bitmask over faces [xmin, xmax, ymin, ymax, zmin, zmax] (bit f set =>
+    // that face is homogeneous DIRICHLET p=0 instead of the default Neumann).
+    // Set ONCE per run from PoissonSolverMultigrid.__init__; it is a
+    // run-constant held in a process-global so it does not have to be threaded
+    // through every multigrid / mgcg / rmgcg / residual / smoother schema.
+    // See common/poisson_gauge.h.  Returns the previous mask.
+    m.def("poisson_set_pressure_bc_mask(int mask) -> int");
+
     // MGCG (multigrid-preconditioned conjugate gradient).
     // Returns (residual, CG iterations performed); same ``tol < 0`` caveat.
     m.def(
@@ -547,6 +557,20 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int nsmoothing, int max_cycles, int precond_vcycles,"
         " float tol, int smoother_id"
         ") -> (Tensor, Tensor, int)");
+}
+
+// ---- per-face pressure BC setter ---------------------------------------
+// Backend-agnostic (it only touches a host global), so it is registered
+// once for CompositeExplicitAutograd rather than per-device.
+static int64_t poisson_set_pressure_bc_mask(int64_t mask)
+{
+    const int64_t prev = poisson::pressure_bc_mask();
+    poisson::pressure_bc_mask() = (int)mask;
+    return prev;
+}
+
+TORCH_LIBRARY_IMPL(lilytorch_kernels, CompositeExplicitAutograd, m) {
+    m.impl("poisson_set_pressure_bc_mask", &poisson_set_pressure_bc_mask);
 }
 
 }  // namespace lilytorch_kernels

@@ -34,27 +34,74 @@
 namespace lilytorch_kernels {
 namespace poisson {
 
-// Full ghost-ring Neumann refresh: for each dim, copy the interior-adjacent
-// slab into the ghost slab on both sides.  Applied in dim order over FULL
-// slabs, so the later dims' copies pick up the earlier dims' writes and the
-// edge/corner ghosts get filled too (the per-sweep BC inside the smoothers
-// only refreshes the face ghosts the stencil reads, and leaves them stale).
-// Matches poisson_mult.PoissonSolver.BC().
+// ── Per-face pressure BC ───────────────────────────────────────────────
+// Face f = 2*d + side, side 0 = lo, 1 = hi, so the order is
+// [xmin, xmax, ymin, ymax, zmin, zmax] — the SAME convention the velocity
+// BCs use (advection.py::_build_bc_ops).  Bit f of the mask set => that
+// face is homogeneous DIRICHLET (p = 0 on the face) instead of Neumann.
+//
+// Both are one ghost write, differing only in sign:
+//     Neumann   (dp/dn = 0):  p_ghost = +p_interior
+//     Dirichlet (p    = 0):   p_ghost = -p_interior
+// because the face sits half a cell outside the last interior centre, so
+// (p_ghost + p_interior)/2 = 0 is exactly p = 0 ON the face.
+//
+// The mask is a run-constant carried in a process-global rather than
+// threaded through ~12 op schemas (multigrid / mgcg / rmgcg / residual /
+// smoother, 2-D and 3-D).  It is set once from
+// PoissonSolverMultigrid.__init__ via the ``poisson_set_pressure_bc_mask``
+// op, read on the host at launch time, and baked into kernel args — so it
+// is CUDA-graph safe as long as it does not change mid-run, which config
+// cannot do.  The SAME mask applies at every multigrid level: coarsening
+// preserves the domain faces, and the coarse-grid correction inherits the
+// homogeneous form of the fine BC (Dirichlet -> correction 0 on the face).
+inline int& pressure_bc_mask()
+{
+    static int mask = 0;
+    return mask;
+}
+
+// +1 for a Neumann face, -1 for a Dirichlet one.
+inline double pressure_bc_sign(int face)
+{
+    return (pressure_bc_mask() >> face) & 1 ? -1.0 : 1.0;
+}
+
+// Full ghost-ring refresh: for each dim, copy the interior-adjacent slab into
+// the ghost slab on both sides, negating it on Dirichlet faces.  Applied in
+// dim order over FULL slabs, so the later dims' copies pick up the earlier
+// dims' writes and the edge/corner ghosts get filled too (the per-sweep BC
+// inside the smoothers only refreshes the face ghosts the stencil reads, and
+// leaves them stale).  Matches poisson_mult.PoissonSolver.BC().
 inline void apply_neumann_bc_full(at::Tensor p)
 {
     const int64_t nd = p.dim();
+    const int m = pressure_bc_mask();
     for (int64_t d = 0; d < nd; ++d) {
         const int64_t L = p.size(d);
-        p.select(d, 0).copy_(p.select(d, 1));
-        p.select(d, L - 1).copy_(p.select(d, L - 2));
+        const bool dlo = (m >> (2 * d + 0)) & 1;
+        const bool dhi = (m >> (2 * d + 1)) & 1;
+        if (dlo) p.select(d, 0).copy_(p.select(d, 1).neg());
+        else     p.select(d, 0).copy_(p.select(d, 1));
+        if (dhi) p.select(d, L - 1).copy_(p.select(d, L - 2).neg());
+        else     p.select(d, L - 1).copy_(p.select(d, L - 2));
     }
 }
 
-// Neumann gauge fix: subtract the INTERIOR mean (float64 accumulation, as in
-// Python: ``p -= p.to(f64).mean().to(p.dtype)``).  Call with a consistent
-// ghost ring — i.e. after apply_neumann_bc_full() or an equivalent BC pass.
+// Gauge fix: subtract the INTERIOR mean (float64 accumulation, as in Python:
+// ``p -= p.to(f64).mean().to(p.dtype)``).  Call with a consistent ghost ring —
+// i.e. after apply_neumann_bc_full() or an equivalent BC pass.
+//
+// ONLY valid for an all-Neumann problem, where the constant is a genuine null
+// direction.  With any Dirichlet face the constant is NOT in the null space —
+// the solution is unique and already anchored — and subtracting the mean would
+// shift it off the boundary condition it was just solved against.  Callers must
+// skip this whenever pressure_bc_mask() != 0.
 inline void gauge_fix(at::Tensor p)
 {
+    // Self-guarding: every driver calls this unconditionally at the end of a
+    // solve, so the Dirichlet check lives here rather than at ~12 call sites.
+    if (pressure_bc_mask() != 0) return;
     at::Tensor interior = p;
     for (int64_t d = 0; d < p.dim(); ++d)
         interior = interior.slice(d, 1, interior.size(d) - 1);

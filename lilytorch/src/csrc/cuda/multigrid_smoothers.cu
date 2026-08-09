@@ -46,6 +46,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "../common/poisson_gauge.h"
 
 namespace lilytorch_kernels {
 
@@ -70,23 +71,30 @@ static __host__ __device__ __forceinline__ int cdiv(int a, int b) {
 // and the read face-ghosts are bit-identical to the old per-axis passes.  The
 // axis pair is selected by blockIdx.{y,z} so the whole BC is one grid launch.
 
+// Each face carries a sign: +1 = Neumann (p_ghost = +p_int), -1 = homogeneous
+// Dirichlet (p_ghost = -p_int, i.e. p = 0 on the face, which sits half a cell
+// outside the last interior centre).  See common/poisson_gauge.h for the face
+// numbering and why the mask is a process-global.
+
 // 2-D: one launch, gridDim.y = 2 selects the x/y face pair.
 template <typename scalar_t>
 __global__ void neumann_bc_2d_fused(scalar_t* __restrict__ p,
-                                     int Nx, int Ny) {
+                                     int Nx, int Ny,
+                                     scalar_t sxlo, scalar_t sxhi,
+                                     scalar_t sylo, scalar_t syhi) {
     const int t      = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = Ny + 2;
     if (blockIdx.y == 0) {                       // x-faces: vary j ∈ [1,Ny]
         const int j = t + 1;
         if (j > Ny) return;
-        p[j]                     = p[stride + j];        // p[0,j]   = p[1,j]
-        p[(Nx + 1) * stride + j] = p[Nx * stride + j];   // p[Nx+1,j]= p[Nx,j]
+        p[j]                     = sxlo * p[stride + j];        // p[0,j]   = p[1,j]
+        p[(Nx + 1) * stride + j] = sxhi * p[Nx * stride + j];   // p[Nx+1,j]= p[Nx,j]
     } else {                                     // y-faces: vary i ∈ [1,Nx]
         const int i = t + 1;
         if (i > Nx) return;
         const int base   = i * stride;
-        p[base]          = p[base + 1];          // p[i,0]    = p[i,1]
-        p[base + Ny + 1] = p[base + Ny];         // p[i,Ny+1] = p[i,Ny]
+        p[base]          = sylo * p[base + 1];   // p[i,0]    = p[i,1]
+        p[base + Ny + 1] = syhi * p[base + Ny];  // p[i,Ny+1] = p[i,Ny]
     }
 }
 
@@ -96,14 +104,21 @@ static void apply_neumann_bc_2d(scalar_t* p,
                                   cudaStream_t stream) {
     constexpr int BLOCK = 256;
     const int span = max(Nx, Ny);
+    namespace pg = lilytorch_kernels::poisson;
     neumann_bc_2d_fused<scalar_t>
-        <<<dim3(cdiv(span, BLOCK), 2), BLOCK, 0, stream>>>(p, Nx, Ny);
+        <<<dim3(cdiv(span, BLOCK), 2), BLOCK, 0, stream>>>(
+            p, Nx, Ny,
+            (scalar_t)pg::pressure_bc_sign(0), (scalar_t)pg::pressure_bc_sign(1),
+            (scalar_t)pg::pressure_bc_sign(2), (scalar_t)pg::pressure_bc_sign(3));
 }
 
 // 3-D: one launch, gridDim.z = 3 selects the x/y/z face pair.
 template <typename scalar_t>
 __global__ void neumann_bc_3d_fused(scalar_t* __restrict__ p,
-                                     int Nx, int Ny, int Nz) {
+                                     int Nx, int Ny, int Nz,
+                                     scalar_t sxlo, scalar_t sxhi,
+                                     scalar_t sylo, scalar_t syhi,
+                                     scalar_t szlo, scalar_t szhi) {
     const int a  = blockIdx.x * blockDim.x + threadIdx.x;   // fast
     const int b  = blockIdx.y * blockDim.y + threadIdx.y;
     const int si = (Ny + 2) * (Nz + 2);
@@ -112,20 +127,20 @@ __global__ void neumann_bc_3d_fused(scalar_t* __restrict__ p,
         const int k = a + 1, j = b + 1;
         if (k > Nz || j > Ny) return;
         const int jk = j * sj + k;
-        p[jk]             = p[si + jk];           // p[0,j,k]    = p[1,j,k]
-        p[(Nx+1)*si + jk] = p[Nx*si + jk];        // p[Nx+1,j,k] = p[Nx,j,k]
+        p[jk]             = sxlo * p[si + jk];    // p[0,j,k]    = p[1,j,k]
+        p[(Nx+1)*si + jk] = sxhi * p[Nx*si + jk]; // p[Nx+1,j,k] = p[Nx,j,k]
     } else if (blockIdx.z == 1) {                 // y-faces: a=k∈[1,Nz], b=i∈[1,Nx]
         const int k = a + 1, i = b + 1;
         if (k > Nz || i > Nx) return;
         const int base = i * si + k;
-        p[base]             = p[base + sj];       // p[i,0,k]    = p[i,1,k]
-        p[base + (Ny+1)*sj] = p[base + Ny*sj];    // p[i,Ny+1,k] = p[i,Ny,k]
+        p[base]             = sylo * p[base + sj];    // p[i,0,k]    = p[i,1,k]
+        p[base + (Ny+1)*sj] = syhi * p[base + Ny*sj]; // p[i,Ny+1,k] = p[i,Ny,k]
     } else {                                      // z-faces: a=j∈[1,Ny], b=i∈[1,Nx]
         const int j = a + 1, i = b + 1;
         if (j > Ny || i > Nx) return;
         const int base = i * si + j * sj;
-        p[base]          = p[base + 1];           // p[i,j,0]    = p[i,j,1]
-        p[base + Nz + 1] = p[base + Nz];          // p[i,j,Nz+1] = p[i,j,Nz]
+        p[base]          = szlo * p[base + 1];    // p[i,j,0]    = p[i,j,1]
+        p[base + Nz + 1] = szhi * p[base + Nz];   // p[i,j,Nz+1] = p[i,j,Nz]
     }
 }
 
@@ -136,9 +151,13 @@ static void apply_neumann_bc_3d(scalar_t* p,
     const dim3 blk(16, 8);
     const int span_a = max(Ny, Nz);              // fast-axis span across pairs
     const int span_b = max(Nx, max(Ny, Nz));     // slow-axis span across pairs
+    namespace pg = lilytorch_kernels::poisson;
     neumann_bc_3d_fused<scalar_t>
         <<<dim3(cdiv(span_a, 16), cdiv(span_b, 8), 3), blk, 0, stream>>>(
-            p, Nx, Ny, Nz);
+            p, Nx, Ny, Nz,
+            (scalar_t)pg::pressure_bc_sign(0), (scalar_t)pg::pressure_bc_sign(1),
+            (scalar_t)pg::pressure_bc_sign(2), (scalar_t)pg::pressure_bc_sign(3),
+            (scalar_t)pg::pressure_bc_sign(4), (scalar_t)pg::pressure_bc_sign(5));
 }
 
 // =====================================================================

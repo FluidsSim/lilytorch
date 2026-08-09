@@ -36,8 +36,74 @@ def _inner(ndim):
     return tuple(slice(1, -1) for _ in range(ndim))
 
 
+# Face order for the pressure BC, matching the velocity BCs in advection.py.
+_BC_FACES = ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax")
+
+# Module-level mirror of the native mask, so the pure-python reference path
+# (PoissonSolver.BC / _gauge_fix) agrees with the native drivers.
+_PRESSURE_BC_MASK = 0
+
+
+def _set_pressure_bc(pressure_bc):
+    """Parse the per-face pressure BC spec and publish it to the native side.
+
+    ``pressure_bc`` is a list of ``"N"`` / ``"D"`` (one per face, order
+    ``xmin, xmax, ymin, ymax, zmin, zmax``), or None/empty for all-Neumann.
+    ``"D"`` is a homogeneous Dirichlet, ``p = 0`` on that face.
+
+    Why this exists: an all-Neumann pressure makes the domain a sealed tank
+    with no outlet, so a cell that is on a wall AND inside a body cannot
+    satisfy incompressibility — its Poisson diagonal collapses and ``p``
+    diverges (the pool-ramp blow-up).  Opening the *velocity* face is only half
+    the condition: the projection still cannot drive flux through a wall whose
+    pressure is zero-gradient.
+
+    NOTE: ``p`` here carries hydrostatic pressure (gravity enters as a body
+    force before the projection), so ``p = 0`` is only physically right on a
+    face where the pressure really is ~uniform atmospheric — an air face.
+    Putting a homogeneous Dirichlet on a face that spans a water column
+    clamps out the hydrostatic gradient and drives a spurious jet.
+
+    Returns the bitmask.
+    """
+    if not pressure_bc:
+        mask = 0
+    else:
+        spec = list(pressure_bc)
+        if len(spec) > len(_BC_FACES):
+            raise ValueError(
+                f"pressure_bc has {len(spec)} entries, at most "
+                f"{len(_BC_FACES)} ({', '.join(_BC_FACES)})")
+        mask = 0
+        for f, t in enumerate(spec):
+            t = str(t).upper()
+            if t == "D":
+                mask |= 1 << f
+            elif t != "N":
+                raise ValueError(
+                    f"pressure_bc[{f}] ({_BC_FACES[f]}) is '{t}'; "
+                    f"expected 'N' (zero-gradient) or 'D' (p=0)")
+    global _PRESSURE_BC_MASK
+    _PRESSURE_BC_MASK = mask
+    # Force the extension to load: this runs at PoissonSolver construction,
+    # which can precede the first native op call, and TORCH_LIBRARY only
+    # registers once the .so is in.
+    from lilytorch.src import _C  # noqa: F401
+    torch.ops.lilytorch_kernels.poisson_set_pressure_bc_mask.default(int(mask))
+    if mask:
+        named = [_BC_FACES[f] for f in range(len(_BC_FACES)) if mask >> f & 1]
+        print(f"Poisson pressure BC: Dirichlet p=0 on {', '.join(named)} "
+              f"(all other faces zero-gradient); gauge fix disabled")
+    return mask
+
+
 def _gauge_fix(x):
     """Neumann gauge fix, in place: subtract the INTERIOR mean.
+
+    A no-op once any face is Dirichlet: the constant is then not in the null
+    space, the solution is already anchored, and subtracting the mean would
+    shift it off the boundary condition it was just solved against.  Mirrors
+    the self-guard in ``gauge_fix()`` in csrc/common/poisson_gauge.h.
 
     The mean must NOT include the ghost ring: its edge/corner cells are dead
     (no 5/7-point stencil reads them) and hold backend-dependent garbage, so a
@@ -50,6 +116,8 @@ def _gauge_fix(x):
     ghost and its interior neighbour shift by the same constant), so the
     caller's last ``BC(x)`` still holds.
     """
+    if _PRESSURE_BC_MASK:
+        return
     inner = _inner(x.ndim)
     x -= x[inner].to(torch.float64).mean().to(x.dtype)
 
@@ -83,7 +151,9 @@ class _MultigridPoissonSolver:
         precond_vcycles=1,
         smoother="jacobi",
         recycle_k=0,
+        pressure_bc=None,
     ):
+        self.pressure_bc_mask = _set_pressure_bc(pressure_bc)
         self.dtype       = dtype
         self.h2          = h * h
         self.device      = device
@@ -155,15 +225,25 @@ class _MultigridPoissonSolver:
 
     @staticmethod
     def BC(q):
-        """Zero-gradient (Neumann) BCs on all faces."""
+        """Ghost-ring pressure BC: zero-gradient by default, ``p = 0`` on any
+        face flagged Dirichlet by ``_set_pressure_bc``.
+
+        Both are one ghost write differing only in sign — ``q_ghost =
+        +q_interior`` for Neumann, ``-q_interior`` for ``p = 0`` — because the
+        face sits half a cell outside the last interior centre.  Mirrors
+        ``apply_neumann_bc_full`` in csrc/common/poisson_gauge.h.
+        """
         ndim = q.ndim
+        m = _PRESSURE_BC_MASK
         for d in range(ndim):
+            slo = -1 if (m >> (2 * d + 0)) & 1 else 1
+            shi = -1 if (m >> (2 * d + 1)) & 1 else 1
             dst = [slice(None)] * ndim; dst[d] = 0
             src = [slice(None)] * ndim; src[d] = 1
-            q[tuple(dst)] = q[tuple(src)]
+            q[tuple(dst)] = slo * q[tuple(src)]
             dst = [slice(None)] * ndim; dst[d] = -1
             src = [slice(None)] * ndim; src[d] = -2
-            q[tuple(dst)] = q[tuple(src)]
+            q[tuple(dst)] = shi * q[tuple(src)]
 
     # ------------------------------------------------------------------
     # Stencil operations  (dimension-agnostic)
