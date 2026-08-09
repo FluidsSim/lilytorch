@@ -10,14 +10,17 @@ index, paper links, and milestone index live in the unified
 [`FluidsSim/lilytorch-docs`](https://github.com/FluidsSim/lilytorch-docs)
 repository. This repository intentionally does not duplicate those pages.
 
+## Examples
+
+### Boat
+
+<video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" controls muted loop></video>
+
 ## Related repositories
 
 - [`FluidsSim/lilytorch_examples`](https://github.com/FluidsSim/lilytorch_examples)
   contains runnable cases, tests, benchmarks, and validation studies.
-- [`FluidsSim/paper`](https://github.com/FluidsSim/paper) contains the manuscript
-  and supplementary material.
-- [`FluidsSim/milestones`](https://github.com/FluidsSim/milestones) contains
-  historical design and investigation records.
+-
 
 ## Installation
 
