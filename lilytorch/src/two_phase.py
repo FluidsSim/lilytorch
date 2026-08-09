@@ -135,9 +135,17 @@ class TwoPhase:
         return 1.0 / (self.alpha * self.rho_water
                       + (1.0 - self.alpha) * self.rho_air)
 
-    def viscosity_cc(self):
-        """Cell-centred kinematic viscosity (volume-weighted)."""
-        return self.alpha * self.nu_water + (1.0 - self.alpha) * self.nu_air
+    def viscosity_cc(self, out=None):
+        """Cell-centred kinematic viscosity (volume-weighted).
+
+        If ``out`` is supplied it is filled in-place, which keeps the momentum
+        coefficient pointer stable during CUDA graph replay.
+        """
+        if out is None:
+            return self.alpha * self.nu_water + (1.0 - self.alpha) * self.nu_air
+        torch.mul(self.alpha, self.nu_water - self.nu_air, out=out)
+        out.add_(self.nu_air)
+        return out
 
     def recip_density_face(self, d):
         """Reciprocal fluid density ``1/rho`` on the staggered *d*-face grid
@@ -250,4 +258,3 @@ class TwoPhase:
         # Final result may be in either buffer; copy back to alpha if needed
         if src is not self.alpha:
             self.alpha.copy_(src)
-

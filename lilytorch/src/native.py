@@ -33,6 +33,7 @@ __all__ = [
     "poisson_solve_rmgcg_3d",
     "advect_flux_accumulate",
     "cvof_sweep",
+    "consistent_momentum_3d",
     "body_update_2d",
     "body_update_3d",
     "RegularGridInterpolator",
@@ -1046,6 +1047,52 @@ def cvof_sweep(
 @torch.library.register_fake("lilytorch_kernels::cvof_sweep")
 def _cvof_sweep_abstract(a, u_d, cfl, face_dim, out):
     pass   # out interior is written in place; no new tensors created
+
+
+def consistent_momentum_3d(
+        alpha: Tensor, u: Tensor, v: Tensor, w: Tensor,
+        rho_new: Tensor, flux: Tensor,
+        uo: Tensor, vo: Tensor, wo: Tensor,
+        alpha_out: Tensor,
+        rho_water: float, rho_air: float, dt: float, h: float,
+        gx: float, gy: float, gz: float, flux_scheme: int = 2) -> None:
+    """Nangia et al. (2019) consistent conservative mass/momentum transport.
+
+    Transports ``rho*u`` with the SAME upwind mass flux that evolves ``rho``
+    and recovers ``u = rho*u / rho_new``, so a 816:1 density jump cannot
+    amplify at the interface.  Replaces BOTH the velocity advection and the
+    Weymouth & Yue VOF sweep -- ``alpha_out`` is synced from the evolved
+    density.
+
+    Gravity enters as ``rho*g`` on the momentum, so the caller MUST suppress
+    the predictor-side ``dt*g`` velocity kick.
+
+    ``rho_new`` and ``flux`` are scratch (fully written); ``flux`` is
+    ``(3, *alpha.shape)`` and holds the shared mass flux, materialised once
+    because the density and momentum updates read it ~39 times per cell.  ``uo``/``vo``/``wo`` are fully
+    written (interior transported, boundary copied from ``u``/``v``/``w``).
+    ``flux_scheme`` picks the reconstruction of the shared mass flux:
+    ``0`` first-order donor cell, ``1`` Weymouth & Yue Courant-corrected
+    van-Leer donor for the density, ``2`` (default) also van-Leer MUSCL for the
+    advected velocity.  Level 0's numerical diffusion damps resolved surface
+    waves; level 1's density face value is algebraically the one
+    :func:`cvof_sweep` uses.
+
+    ``alpha_out`` must be a DISTINCT tensor from ``alpha`` (the schema
+    declares ``alpha`` an immutable input).
+    """
+    return torch.ops.lilytorch_kernels.consistent_momentum_3d.default(
+        alpha, u, v, w, rho_new, flux, uo, vo, wo, alpha_out,
+        float(rho_water), float(rho_air), float(dt), float(h),
+        float(gx), float(gy), float(gz), int(flux_scheme),
+    )
+
+
+@torch.library.register_fake("lilytorch_kernels::consistent_momentum_3d")
+def _consistent_momentum_3d_abstract(
+        alpha, u, v, w, rho_new, flux, uo, vo, wo, alpha_out,
+        rho_water, rho_air, dt, h, gx, gy, gz, flux_scheme):
+    pass   # every output is preallocated and written in place
 
 
 def strain_rate_magnitude(

@@ -344,6 +344,71 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(a!) out"
         ") -> ()");
 
+    // ---- Consistent mass/momentum transport (Nangia et al. 2019) -------
+    // consistent_momentum_3d: transports rho*u with the SAME upwind mass
+    // flux that evolves rho, and recovers u = rho*u / rho_new with the
+    // flux-evolved density.  This is the cure for the high-density-ratio
+    // instability: non-conservative velocity transport plus an
+    // independently reconstructed rho is stable only to ~100:1, and
+    // water/air here is 816:1.  Replaces BOTH the velocity advection and
+    // the Weymouth & Yue VOF sweep -- the interface is carried by the
+    // density itself (alpha_out is synced from rho_new).
+    //
+    // Gravity enters as a rho*g BODY FORCE on the momentum (NOT a velocity
+    // pre-kick), so the density flux rides on the ~divergence-free
+    // velocity and mass is conserved.  The caller must therefore suppress
+    // the predictor-side dt*g.
+    //
+    // Single forward-Euler pass (Nangia n_cycles=1): the advecting, the
+    // advected and the momentum-carrying velocity are all u^n.
+    //
+    // MAC convention: q[k] along axis d is the face LEFT of cell k.
+    //   F[d][k]   = u[d][k] * (u[d][k] >= 0 ? rho[k-1] : rho[k])
+    //   rho_new[i]= rho[i] - (dt/h) * sum_d (F[d][i+1] - F[d][i])
+    //   self  (d==i): Mc[k]  = 0.5*(F[i][k] + F[i][k+1])   (cell centred)
+    //   cross (d!=i): Me[k]  = 0.5*(F[d][k-1] + F[d][k])   (i-face edge)
+    //   u_out = (rho_face^n u^n - (dt/h) div(flux) + dt*g*rho_face^n)
+    //           / rho_face_new
+    //
+    // alpha    : cell-centred volume fraction (full ghost-padded grid).
+    // u, v, w  : MAC velocity components (full grid, strided OK).
+    // rho_new  : preallocated full-grid scratch; FULLY written (ghost
+    //            cells receive the OLD density, interior the updated one).
+    // flux     : preallocated (3, N0, N1, N2) scratch; FULLY written.  The
+    //            shared mass flux is materialised once here because the
+    //            density update and all three momentum components read it
+    //            ~39 times per cell between them.
+    // uo/vo/wo : preallocated outputs, shaped like u/v/w; the interior is
+    //            written, the boundary layer is copied from u/v/w.
+    // alpha_out: preallocated; fully written as
+    //            clamp((rho_new - rho_air)/(rho_water - rho_air), 0, 1).
+    //            MUST be a distinct tensor from `alpha`: the schema declares
+    //            `alpha` an immutable input, so aliasing it would break the
+    //            dispatcher's contract even though the launch order (the
+    //            alpha sync runs after the momentum kernels) would allow it.
+    // flux_scheme selects the reconstruction used for the SHARED mass flux
+    // (and, at level 2, for the advected velocity as well):
+    //   0 = first-order donor cell for both  (the recovered reference)
+    //   1 = Weymouth & Yue Courant-corrected van-Leer donor for the DENSITY,
+    //       donor cell for the velocity
+    //   2 = as 1, plus a van-Leer MUSCL reconstruction of the advected
+    //       velocity  (recommended: level 0's numerical diffusion damps
+    //       resolved surface waves)
+    // Level 1's density face value is algebraically identical to the one
+    // ``cvof_sweep`` already uses -- rho = alpha*(rho_w-rho_a) + rho_a is
+    // affine and the van-Leer slope is linear in it -- so the interface keeps
+    // the sharpness of the stock W&Y VOF while the flux stays shared with the
+    // momentum, which is the whole point of consistent transport.
+    m.def(
+        "consistent_momentum_3d("
+        "Tensor alpha, Tensor u, Tensor v, Tensor w,"
+        " Tensor(a!) rho_new, Tensor(f!) flux,"
+        " Tensor(b!) uo, Tensor(c!) vo, Tensor(d!) wo,"
+        " Tensor(e!) alpha_out,"
+        " float rho_water, float rho_air, float dt, float h,"
+        " float gx, float gy, float gz, int flux_scheme"
+        ") -> ()");
+
     // ---- Strain-rate magnitude ----------------------------------------
     // strain_rate_magnitude: |S̄| = sqrt(2·S_ij·S_ij) at every grid point,
     // for the Smagorinsky eddy viscosity, the Carreau / yield-damping

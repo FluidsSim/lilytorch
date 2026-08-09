@@ -39,20 +39,13 @@ The hydrostatic interface jump and the buoyancy on the body therefore emerge
 automatically from the density-weighted pressure (``∇p = ρ_fluid g`` at rest).
 """
 
-import os
-
 import torch
 
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src import forces as _forces
 from lilytorch.src.advection import _sl
-from lilytorch.src.two_phase import TwoPhase
-
-# Debug override for the Poisson coefficient floor (see
-# ``TwoPhaseSolver._coeff_floor``).  Read once at import: it used to be an
-# ``os.environ`` lookup inside the per-step rescale.
-_COEFF_FLOOR_ENV = os.environ.get("LILYTORCH_COEFF_FLOOR")
-_COEFF_FLOOR_ENV = None if _COEFF_FLOOR_ENV is None else float(_COEFF_FLOOR_ENV)
+from lilytorch.src.two_phase import TwoPhase, _neumann_pad
+from lilytorch.src import native as _native
 
 
 def body_aware_alpha_init(alpha_init, sdf_cc, eps, h, *,
@@ -339,20 +332,92 @@ class TwoPhaseSolver(FluidSolver):
         else:
             self.two_phase = TwoPhase(self.x, self.y, self.h, alpha_init,
                                       z=self.z, **kwargs)
-        # REMOVED experimental toggles (cuda_native_port Phase 4.4).  Reject
-        # loudly when a config still enables them rather than silently running
-        # a different scheme.  ``consistent_momentum`` (Nangia 2019 conservative
-        # rho*u transport) and ``mu0_free_coeff`` were toy-boat waterline
-        # experiments; the adopted stabilisers are ``rho_solid``,
-        # ``air_transparent_body`` and ``alpha_exclude_body``.
-        for _removed in ("consistent_momentum", "consistent_n_cycles",
-                         "mu0_free_coeff"):
-            if cfg.get(_removed):
-                raise ValueError(
-                    f"solver.two_phase.{_removed} was removed (Phase 4.4 "
-                    "cleanup); use rho_solid / air_transparent_body / "
-                    "alpha_exclude_body to stabilise the waterline band."
-                )
+        # ``consistent_momentum`` (Nangia et al. 2019 conservative rho*u
+        # transport) was deleted in the Phase 4.4 cleanup as an unused python
+        # path and is now REINSTATED on the fused native path -- see
+        # ``_advect_momentum`` below.  It transports rho*u with the same
+        # upwind mass flux that evolves rho, which is the standard cure for
+        # the high-density-ratio instability (non-conservative transport is
+        # stable only to ~100:1; water/air is 816:1).  Default OFF, so every
+        # existing case is byte-for-byte unchanged.
+        self._consistent_momentum = bool(cfg.get("consistent_momentum", False))
+        # Reconstruction of the shared mass flux: 0 = first-order donor cell
+        # (the recovered reference), 1 = W&Y Courant-corrected van-Leer donor
+        # for the density, 2 = also van-Leer MUSCL for the advected velocity.
+        # Default 2: level 0 is stable but its numerical diffusion damps
+        # resolved surface waves.
+        self._cm_flux_scheme = int(cfg.get("consistent_momentum_flux", 2))
+        # ``alpha_fluid_exact`` was a transitional flag while the exact
+        # ``min(alpha, mu0)/mu0`` replaced the amplifying ``alpha/max(mu0,1e-3)``
+        # in _alpha_fluid_cc.  The exact form is now the ONLY form: it is
+        # strictly better measured, mathematically correct where the clamp was
+        # not, and it needs no tolerance.  Reject the key rather than silently
+        # ignoring it.
+        if "alpha_fluid_exact" in cfg:
+            raise ValueError(
+                "two_phase.alpha_fluid_exact was removed: the exact "
+                "min(alpha, mu0)/mu0 it selected is now the only behaviour "
+                "(see TwoPhaseSolver._alpha_fluid_cc).  Delete the key."
+            )
+        # Weight the face density by the fluid volume mu0 either side, so a
+        # carved (alpha = 0, i.e. "air") body interior cannot vote on the
+        # density of the faces bounding the hull.  Default OFF; see
+        # _kernel_face_mean_fluid_weighted.  This is the BDIM-legal way to say
+        # "the density at the body is the density of the FLUID there" -- unlike
+        # rho_solid, it invents no solid density and touches no physics, it
+        # only stops a zero-fluid cell contributing to a fluid average.
+        self._face_density_fluid_weighted = bool(
+            cfg.get("face_density_fluid_weighted", False))
+        # NOTE: consistent momentum + alpha_exclude_body used to be rejected
+        # here.  The incompatibility was NOT intrinsic -- it was the
+        # ``alpha / max(mu0, 1e-3)`` divisor, which amplified any alpha/mu0
+        # drift in the BDIM band by up to 1000x (measured: |p| 1.6 kPa ->
+        # 1.1e6 Pa by it 5750, with the flow still healthy).  With the exact
+        # ``min(alpha, mu0)/mu0`` the combination runs: 7000 steps, median |p|
+        # 1598 Pa, and 925 pressure excursions against the 893 the carve
+        # produces on its OWN -- i.e. consistent momentum adds nothing to the
+        # carve's own, still-unexplained blow-up (onset it 2738 regardless of
+        # transport scheme, timestep or coefficient formulation).
+        if self._cm_flux_scheme not in (0, 1, 2):
+            raise ValueError(
+                "two_phase.consistent_momentum_flux must be 0, 1 or 2, got "
+                f"{self._cm_flux_scheme}."
+            )
+        # Consistent transport REPLACES the momentum advection outright, so
+        # ``solver.convection_method`` stops having any effect.  Say so out
+        # loud: a config carrying both reads as if the named scheme were
+        # running, and this project has already been bitten by settings that
+        # were silently ignored (BRIEF §7 -- YAML drops unknown keys without a
+        # word, and a whole batch of experiment configs quietly degraded to
+        # plain baselines).
+        if self._consistent_momentum:
+            _named = getattr(self.adv_diff_solver, "_scheme_name", None)
+            print(
+                f"TwoPhaseSolver: consistent_momentum is ON, so "
+                f"solver.convection_method='{_named}' is IGNORED -- momentum is "
+                f"transported by the shared mass flux "
+                f"(consistent_momentum_flux={self._cm_flux_scheme}), and the "
+                f"Weymouth & Yue VOF sweep is skipped (the interface rides on "
+                f"the density).", flush=True)
+        if self._consistent_momentum and self.ndim != 3:
+            raise ValueError(
+                "two_phase.consistent_momentum is implemented for the 3-D "
+                "fused path only (no 2-D kernel)."
+            )
+        if cfg.get("consistent_n_cycles", 1) not in (1, None):
+            raise ValueError(
+                "two_phase.consistent_n_cycles > 1 (Nangia fixed-point "
+                "iteration) was not ported to the fused kernel; only the "
+                "single forward-Euler pass (n_cycles=1) is available."
+            )
+        # ``mu0_free_coeff`` stays removed: it was a toy-boat waterline
+        # experiment superseded by rho_solid / air_transparent_body.
+        if cfg.get("mu0_free_coeff"):
+            raise ValueError(
+                "solver.two_phase.mu0_free_coeff was removed (Phase 4.4 "
+                "cleanup); use rho_solid / air_transparent_body / "
+                "alpha_exclude_body to stabilise the waterline band."
+            )
         # Three-phase density (Nangia 2019 WSI, Eq. 23): treat the body as a
         # smoothed THIRD density phase rho_solid, blended by mu0 (the BDIM fluid
         # fraction IS the body Heaviside), INSIDE the variable-density projection
@@ -378,6 +443,10 @@ class TwoPhaseSolver(FluidSolver):
         # whose default union-∂H readout (force_link_normal='union') already
         # carries the summation-by-parts gauge fix for BOTH channels.
         flags = []
+        if self._consistent_momentum:
+            flags.append("CONSISTENT rho*u transport (Nangia 2019; replaces "
+                         "velocity advection AND the W&Y VOF sweep; flux "
+                         f"scheme {self._cm_flux_scheme})")
         if self._rho_solid is not None:
             flags.append(f"three-phase rho_solid={self._rho_solid}")
         if self._air_transparent_body:
@@ -410,6 +479,157 @@ class TwoPhaseSolver(FluidSolver):
         see :meth:`_face_mean`)."""
         return self._face_mean(self.two_phase.alpha, d)
 
+    def _momentum_viscosity(self, *vels):
+        """Return the phase-dependent kinematic viscosity used by momentum.
+
+        The base solver's scalar ``solver.nu`` is only a single-phase default.
+        Two-phase momentum must use ``nu_water``/``nu_air`` from the transported
+        VOF field.  Keep the result in a pointer-stable buffer so CUDA graph
+        replay sees the current alpha field rather than a captured temporary.
+        LES/Carreau increments, when enabled, are added to this molecular
+        viscosity.
+        """
+        ref = vels[0]
+        if (getattr(self, '_nu_eff_graph', None) is None
+                or self._nu_eff_graph.shape != ref.shape
+                or self._nu_eff_graph.dtype != ref.dtype
+                or self._nu_eff_graph.device != ref.device):
+            self._nu_eff_graph = torch.empty_like(ref)
+        out = self._nu_eff_graph
+        self.two_phase.viscosity_cc(out=out)
+        nu_extra = self._compute_nu_t(*vels)
+        if nu_extra is not None:
+            out.add_(nu_extra)
+        return out
+
+    # ------------------------------------------------------------------
+    #  Consistent conservative mass/momentum transport (Nangia et al. 2019)
+    # ------------------------------------------------------------------
+    def _init_cm_buffers(self, *vel):
+        """Lazily allocate the pointer-stable scratch the consistent-momentum
+        op writes.  Allocation happens on an eager warm-up step (the graph
+        runner runs three before it captures), so the capture itself stays
+        allocation-free."""
+        ref = vel[0]
+        def _stale(b):
+            return (b is None or b.shape != ref.shape or b.dtype != ref.dtype
+                    or b.device != ref.device)
+        if _stale(getattr(self, '_cm_rho_new', None)):
+            self._cm_rho_new   = torch.empty_like(self.two_phase.alpha)
+            self._cm_alpha_out = torch.empty_like(self.two_phase.alpha)
+            self._cm_flux      = torch.empty(
+                (3,) + tuple(self.two_phase.alpha.shape),
+                dtype=self.two_phase.alpha.dtype,
+                device=self.two_phase.alpha.device)
+        if (getattr(self, '_cm_out', None) is None
+                or any(_stale(b) for b in self._cm_out)):
+            self._cm_out = tuple(torch.empty_like(x) for x in vel)
+            self._cm_diff_copy = tuple(torch.empty_like(x) for x in vel)
+
+    def _advect_momentum(self, *vel, nu_eff=None):
+        """Consistent conservative ``rho*u`` transport in place of the
+        velocity advection (Nangia et al. 2019).
+
+        Transports ``rho*u`` with the SAME upwind mass flux that evolves
+        ``rho`` and recovers ``u = rho*u / rho_new``, so the 816:1 density
+        jump cannot amplify at the interface.  This single call replaces
+        BOTH the velocity advection AND the Weymouth & Yue VOF sweep: the
+        interface rides on the density, and ``two_phase.alpha`` is written
+        in place from it (``_advect_vof`` becomes a no-op).
+
+        Gravity is applied as ``rho*g`` on the momentum here, so
+        ``_apply_gravity_body_force`` suppresses the predictor ``dt*g``.
+
+        Runs inside the graph capture: launch-only after the first eager
+        warm-up step.
+        """
+        if not self._consistent_momentum:
+            return super()._advect_momentum(*vel, nu_eff=nu_eff)
+        u, v, w_vel = vel
+        tp = self.two_phase
+        self._init_cm_buffers(u, v, w_vel)
+        # Publish u' for the air-transparent velocity identity.  On the stock
+        # path that stash is done by the ``adv_diff_solver.solve`` wrapper
+        # installed in __init__ -- which this override never calls, so without
+        # this line ``_kernel_primes`` stays None forever and
+        # ``_kernel_blend_velocities`` returns early on EVERY step: the BDIM
+        # kernel then keeps imposing the body velocity into the air while the
+        # rescaled coefficients say the body is not there, which is the
+        # historical kernel-mode blow-up.  It is invisible in the fluid probes
+        # (pinning the air to the hull is if anything stabilising) and shows up
+        # only as corrupt body loads.  Assign after _init_cm_buffers so a
+        # reallocation cannot leave the stash pointing at a dead buffer.
+        self._kernel_primes = self._cm_out
+        g = self._gravity if self.use_gravity else (0.0, 0.0, 0.0)
+        # Every scalar goes through _cached_float: dt / h / nu may be 0-d GPU
+        # tensors, and float(gpu_tensor) is a host<->device sync -- which is
+        # ILLEGAL inside a CUDA graph capture (it fails the whole capture, not
+        # just this call).
+        cf = self._cached_float
+        dt_f = cf('dt', self.dt)
+        _native.consistent_momentum_3d(
+            tp.alpha, u, v, w_vel,
+            self._cm_rho_new, self._cm_flux,
+            self._cm_out[0], self._cm_out[1], self._cm_out[2],
+            self._cm_alpha_out,
+            tp.rho_water, tp.rho_air, dt_f, cf('h', self.h),
+            cf('g0', g[0]), cf('g1', g[1]), cf('g2', g[2]),
+            self._cm_flux_scheme,
+        )
+        # The op writes a separate buffer because the schema declares `alpha`
+        # an immutable input; commit it, then restore the zero-gradient ghost
+        # contract that the W&Y path maintains via _neumann_pad (the density
+        # update leaves ghost cells at their previous value).
+        tp.alpha.copy_(self._cm_alpha_out)
+        _neumann_pad(tp.alpha)
+        for i in range(len(vel)):
+            _native.diffuse_add(
+                self._cm_out[i], self._cm_diff_copy[i], dt_f,
+                dh=self.adv_diff_solver.dh, nu_eff=nu_eff,
+                nu=cf('nu', self.nu),
+            )
+        return tuple(self._cm_out)
+
+    def _probe_band_alpha(self, a_f):
+        """Opt-in diagnostic: how healthy is ``alpha/mu0`` inside the BDIM band?
+
+        Set ``LILYTORCH_BAND_ALPHA_PROBE=<every_n_steps>``.  Runs on BOTH the
+        stock and the consistent-momentum paths (it hangs off
+        ``_alpha_fluid_cc``, which both call every step), so the two are
+        directly comparable at matched iterations.
+
+        The number that matters is the fraction of WETTED band cells reading as
+        partial air (``a_f < 0.5``): per this method's docstring that is the
+        buoyant shell which erupts as spurious plumes.  Off by default; the
+        reductions sync, so never leave it on in a production run.
+        """
+        import os
+        n = os.environ.get("LILYTORCH_BAND_ALPHA_PROBE")
+        if not n:
+            return
+        it = getattr(self, "_band_probe_it", 0)
+        self._band_probe_it = it + 1
+        if it % int(n):
+            return
+        comp = self.composite_body
+        sdf = getattr(comp, "sdf_val", None)
+        if sdf is None:
+            return
+        eps = self._cached_float("eps", self.eps)
+        band = (sdf > -eps) & (sdf < eps)
+        nb = int(band.sum())
+        if nb == 0:
+            return
+        af = a_f[band]
+        wet = af > 0.05                      # ignore the dry (air-side) band
+        nwet = int(wet.sum())
+        dry_ish = int((af < 0.5).sum())
+        print(f"[band] it={it:6d} band={nb} wet={nwet} "
+              f"a_f<0.5={dry_ish} ({100.0 * dry_ish / nb:5.1f}%) "
+              f"min={float(af.min()):.4f} mean={float(af.mean()):.4f} "
+              f"alpha_max={float(self.two_phase.alpha[band].max()):.4f}",
+              flush=True)
+
     def _alpha_fluid_cc(self):
         """Water fraction of the cell's FLUID part (cell-centred).
 
@@ -435,7 +655,34 @@ class TwoPhaseSolver(FluidSolver):
         if not self._alpha_exclude_body:
             return a
         mu0 = self._mu0_cc()
-        return (a / mu0.clamp(min=1e-3)).clamp(0.0, 1.0)
+        # Capping the NUMERATOR at mu0 makes the ratio <= 1 by construction, so
+        # it is finite for EVERY mu0 > 0 -- checked down to float32 tiny; the
+        # smallest mu0 the band Heaviside produces is ~5e-10.  There is no
+        # tolerance to pick: the test is the exact `mu0 > 0`.  Outside the band
+        # mu_funcs writes `(d >= 0)`, i.e. exactly 0.0 or exactly 1.0, so `> 0`
+        # is a clean partition and not a threshold.  The final clamp is to the
+        # PHYSICAL bounds of a volume fraction, not a tuning constant: alpha is
+        # observed to go slightly negative (-9e-5 in a real run) and a negative
+        # a_f would drive the density blend toward zero.
+        #
+        # This superseded ``alpha / max(mu0, 1e-3)``, which was not merely a
+        # cruder spelling but a DIFFERENT number where it matters: a consistent
+        # band cell with mu0 = alpha = 1e-4 has a_f = 1 (its fluid part is pure
+        # water), where the clamp returned 1e-4/1e-3 = 0.1 -- reading a wet cell
+        # as 90 % AIR.  That is exactly the buoyant shell this method's
+        # docstring describes, manufactured by the guard meant to prevent it.
+        # Measured on the pool ramp (carve on, 7000 steps): peak |p| 1.9e7 ->
+        # 1.2e7, p95 9.3e4 -> 4.3e4, |u|max 2.009 -> 1.845.
+        #
+        # ⚠ What a_f means at mu0 == 0 is a DEFINITION, not a tolerance: the
+        # cell has no fluid part.  0 is used.  It is not fully inert, because
+        # ``_rescale_kernel_coeffs_two_phase`` face-averages q(a_f); set
+        # ``face_density_fluid_weighted`` to drop zero-fluid cells out of that
+        # average and remove the choice entirely.
+        a_f = torch.where(mu0 > 0, torch.minimum(a, mu0) / mu0,
+                          torch.zeros_like(a)).clamp(0.0, 1.0)
+        self._probe_band_alpha(a_f)
+        return a_f
 
     # ------------------------------------------------------------------
     #  Override: BDIM velocity imposition — air-transparent body
@@ -528,6 +775,40 @@ class TwoPhaseSolver(FluidSolver):
         out[hi] = 0.5 * (q[lo] + q[hi])
         return out
 
+    def _kernel_face_mean_fluid_weighted(self, q, w, d):
+        """Face mean of *q* weighted by the FLUID VOLUME *w* (= mu0) either side.
+
+            q_face = (w_L q_L + w_R q_R) / (w_L + w_R)
+
+        A cell with no fluid (mu0 = 0) contributes nothing, so the face density
+        is set entirely by whichever side actually holds fluid.  That is the
+        point: with the ``alpha_exclude_body`` carve the body interior is
+        alpha = 0, i.e. it reads as AIR, and a plain arithmetic face mean lets
+        that phantom air into every face bounding the hull -- the wetted band
+        is water on one side and "air" on the other, so the face comes out at
+        ~half air (1/rho 0.408 against water's 0.001).  Weighting by mu0 says
+        instead: the density of a face is the density of the FLUID at that
+        face, and the body's interior has no vote.
+
+        Falls back to the plain mean where both sides are dry, which is a cell
+        pair wholly inside the body -- the coefficient there is mu0*(...) = 0
+        regardless, so the value is immaterial and only needs to be finite.
+        """
+        if self.ndim == 2:
+            lo = _sl(2, d, slice(None, -1))
+            hi = _sl(2, d, slice(1, None))
+        else:
+            lo = [slice(1, -1)] * 3
+            hi = [slice(1, -1)] * 3
+            lo[d] = slice(None, -1)
+            hi[d] = slice(1, None)
+            lo, hi = tuple(lo), tuple(hi)
+        wl, wr = w[lo], w[hi]
+        den = wl + wr
+        return torch.where(den > 0,
+                           (wl * q[lo] + wr * q[hi]) / den.clamp(min=1e-30),
+                           0.5 * (q[lo] + q[hi]))
+
     def _kernel_face_mean(self, q, d):
         """Like :meth:`_face_mean` but in the KERNEL coefficient-buffer
         layout: full padded grid in 2-D, ghost-cropped staggered face grid in
@@ -599,9 +880,23 @@ class TwoPhaseSolver(FluidSolver):
         # ``_conv_out``), which the graph rewrites in place on every replay, so
         # holding the reference costs no extra memory and always reads this
         # step's u'.
-        primes = getattr(self, "_kernel_primes", None)
-        if primes is None or not self._air_transparent_body:
+        if not self._air_transparent_body:
             return
+        primes = getattr(self, "_kernel_primes", None)
+        if primes is None:
+            # Reaching here means some momentum path ran without publishing u'.
+            # Returning quietly is what let consistent_momentum ship a broken
+            # force handoff: the fluid stayed healthy and only the body loads
+            # were wrong, so nothing in the fluid probe set could see it.
+            raise RuntimeError(
+                "air_transparent_body is on but no advection output u' was "
+                "published, so the velocity blend a*S + (1-a)*u' cannot run "
+                "and the BDIM kernel is imposing the body velocity into the "
+                "air phase.  Whatever _advect_momentum ran this step must set "
+                "self._kernel_primes to its output buffers (the stock path "
+                "does it in the adv_diff_solver.solve wrapper; consistent "
+                "momentum does it in TwoPhaseSolver._advect_momentum)."
+            )
         comp = self.composite_body
         a_f = self._alpha_fluid_cc()   # fluid-part fraction; see _alpha_fluid_cc
         for d, (vel, prime) in enumerate(zip(vels, primes)):
@@ -612,8 +907,14 @@ class TwoPhaseSolver(FluidSolver):
         self.adv_diff_solver.set_BCs(*vels)
 
     def _rescale_kernel_coeffs_two_phase(self, coeffs):
-        """Return fresh two-phase Poisson coefficients from the kernel's
-        water-normalised ``c_kernel = dt*mu0/rho_water`` ones.
+        """Return WaterLily-scaled coefficients from the kernel buffers.
+
+        The projection solves for the pressure impulse
+        ``q = dt*p/rho_water`` with coefficient
+        ``mu0*rho_water/rho_face``.  This is algebraically identical to solving
+        for physical pressure with ``dt*mu0/rho_face``, but keeps liquid
+        coefficients O(1), so the Poisson tolerance and zero-diagonal test are
+        not accidentally compared with a 1e-6-scaled operator.
 
         When ``bdim_mu0_projection`` is True the fluid fraction μ₀ is recovered
         directly from the kernel coefficient (zero extra cost).  When False the
@@ -624,6 +925,7 @@ class TwoPhaseSolver(FluidSolver):
         tp = self.two_phase
         dt = float(self.dt)
         rs = self._rho_solid
+        normalized = (tp.rho_water != tp.rho_air or rs is not None)
         # Fluid-part water fraction (identity when the carve is off) — the
         # density blend and the transparency mask must not count the body
         # volume as air; see _alpha_fluid_cc.
@@ -635,7 +937,11 @@ class TwoPhaseSolver(FluidSolver):
             if c_kernel is None:                   # cw in 2-D
                 out.append(None)
                 continue
-            inv_rho = self._kernel_face_mean(q, d)
+            if self._face_density_fluid_weighted:
+                inv_rho = self._kernel_face_mean_fluid_weighted(
+                    q, self._mu0_cc(), d)
+            else:
+                inv_rho = self._kernel_face_mean(q, d)
             # Recover fluid fraction μ₀: prefer the kernel coefficient
             # (fast, exact match to what the BDIM kernel used) when
             # available; otherwise compute from the persistent cell-centred
@@ -652,43 +958,33 @@ class TwoPhaseSolver(FluidSolver):
                     mu0_t = torch.where(sdf_face >= 0.0, mu0_t, mu0)
                 mu0 = mu0_t
             if rs is not None:
-                out.append(dt / (mu0 / inv_rho + (1.0 - mu0) * rs))
-            else:
+                out.append(tp.rho_water /
+                           (mu0 / inv_rho + (1.0 - mu0) * rs))
+            elif not normalized:
+                # Preserve exact single-phase reduction (including its
+                # tolerance scaling) when both phases have one density.
                 out.append(dt * mu0 * inv_rho)
-        # ── Prevent singular operator inside large bodies ────────────
-        # μ₀ → 0 inside the body → c = dt·μ₀/ρ → 0 → div(0·grad(p)) is
-        # singular.  Multigrid stalls on large connected zero-coefficient
-        # regions.  The compatibility default is capped at the liquid
-        # coefficient dt/ρ_water. BDIM already overrides velocities inside the
-        # body, so extending that coefficient through its deep interior does
-        # not alter the fluid correction and keeps the operator conditioned.
+            else:
+                out.append(tp.rho_water * mu0 * inv_rho)
+        # ── The degenerate μ₀ → 0 interior is not floored here ───────
+        # c = dt·μ₀/ρ → 0 inside a body makes div(c·grad(p)) singular there.
+        # That is the Poisson solver's degenerate-cell mask's job
+        # (``poisson_jcap_tol``, |J| < tol → row/column dropped, residual
+        # masked), the same guard the un-floored single-phase FluidSolver
+        # relies on.
         #
-        # This MUST scale with dt.  The old absolute 1e-6 happened to equal
-        # dt/ρ_water for dt=1e-3, but at finer grids (dt∝h) it clipped even the
-        # open-water coefficient.  At N=96, dt/ρ_water=7.05e-7, producing the
-        # observed pressure/force factor 7.05e-7/1e-6 ≈ 0.707.
-        _floor = self._coeff_floor
-        if _floor > 0.0:
-            out = tuple(torch.clamp(c, min=_floor) if isinstance(c, torch.Tensor) else c
-                        for c in out)
+        # A coefficient floor CANNOT also do that job, because the open-water
+        # coefficient *is* dt/ρ_water: since c = dt·μ₀/ρ_water ≤ dt/ρ_water for
+        # every μ₀ ≤ 1, any floor at that scale saturates the whole SUBMERGED
+        # BDIM band, not just the deep interior — the projection then sees no
+        # wetted geometry at all and drives flux straight through the body.
+        # The historical ``min(1e-6, dt/ρ_water)`` default did exactly that
+        # (measured on the pool-ramp case: 99.9 % of the submerged band and
+        # 100 % of the submerged interior clamped to the open-water value),
+        # and it also pre-empted ``poisson_jcap_tol`` entirely — with it on,
+        # not one cell was ever frozen.
+        #
         return tuple(out)
-
-    @property
-    def _coeff_floor(self):
-        """Coefficient floor for :meth:`_rescale_kernel_coeffs_two_phase`.
-
-        The ``LILYTORCH_COEFF_FLOOR`` override is read once at import
-        (``_COEFF_FLOOR_ENV``) rather than per step; the dt-dependent default
-        stays computed here so an adaptive dt still scales it.
-        """
-        if _COEFF_FLOOR_ENV is not None:
-            return _COEFF_FLOOR_ENV
-        tp = self.two_phase
-        if tp.rho_water == tp.rho_air:
-            # Preserve the exact uniform-density reduction to FluidSolver,
-            # whose BDIM coefficient is not floored.
-            return 0.0
-        return min(1e-6, float(self.dt) / tp.rho_water)
 
     def project(self, *args, ch=None, cv=None, cw=None, ch_cc=None, **kwargs):
         """Fused path only: blend the BDIM velocity with u' (air-transparent
@@ -697,14 +993,30 @@ class TwoPhaseSolver(FluidSolver):
         here with freshly-built two-phase coefficients (not the solver's
         persistent water-normalised buffers), so the identity check on
         ``_ch_persist`` keeps it untouched."""
-        if isinstance(ch, torch.Tensor) and ch is getattr(self, '_ch_persist', None):
+        fused = (isinstance(ch, torch.Tensor)
+                 and ch is getattr(self, '_ch_persist', None))
+        scaled = fused and (self.two_phase.rho_water != self.two_phase.rho_air
+                            or self._rho_solid is not None)
+        if fused:
             vels = list(args[:2])
             if self.ndim == 3:
                 vels.append(kwargs["w_vel"])
             self._kernel_blend_velocities(vels)
             ch, cv, cw = self._rescale_kernel_coeffs_two_phase((ch, cv, cw))
+            if scaled:
+                # Base project warm-starts from args[2] and returns physical p
+                # by convention. Temporarily convert that persistent field to
+                # q, then convert it back below for forces and output.
+                args = list(args)
+                args[2].mul_(float(self.dt) / self.two_phase.rho_water)
+                args = tuple(args)
 
-        return super().project(*args, ch=ch, cv=cv, cw=cw, ch_cc=ch_cc, **kwargs)
+        out = super().project(*args, ch=ch, cv=cv, cw=cw,
+                              ch_cc=ch_cc, **kwargs)
+        if scaled:
+            out = (*out[:-1], out[-1].mul_(self.two_phase.rho_water /
+                                           float(self.dt)))
+        return out
 
     # ------------------------------------------------------------------
     #  Override: EMERGENT body force (viscous + real-pressure integral)
@@ -844,6 +1156,15 @@ class TwoPhaseSolver(FluidSolver):
         np.savez_compressed(path, **out)
         print(f"[band-dump] iteration {iteration} -> {path} "
               f"({out['sdf'].shape}, eps={out['eps']:.5g}, h={out['h']:.5g})")
+
+    def _apply_gravity_body_force(self, *vels):
+        """Suppressed under consistent momentum transport: gravity is applied
+        there as a ``rho*g`` body force on the momentum itself (so the mass
+        flux rides on the ~divergence-free velocity).  Adding ``dt*g`` here
+        too would double-count it."""
+        if self._consistent_momentum:
+            return vels
+        return super()._apply_gravity_body_force(*vels)
 
     def _build_hydrostatic_reference(self):
         """Two-phase density is variable (water/air VOF blend), so the
@@ -1000,6 +1321,11 @@ class TwoPhaseSolver(FluidSolver):
     def _advect_vof(self, u, v, p, iteration, w_vel=None):
         """VOF transport (cvof sweeps), graph-captured on CUDA.
 
+        No-op under consistent momentum transport: ``_advect_momentum``
+        already moved the interface by evolving the density with the same
+        mass flux that carried the momentum, and running a second, independent
+        W&Y sweep here would transport alpha twice.
+
         Uses :class:`NativeWholeStepGraphRunner` to capture the per-direction
         W&Y conservative sweeps into a single graph replay.  Each sweep-parity
         variant gets its own graph; the parity is toggled OUTSIDE the graph
@@ -1007,6 +1333,8 @@ class TwoPhaseSolver(FluidSolver):
         during graph replay.
         On CPU, falls back to eager execution.
         """
+        if self._consistent_momentum:
+            return
         tp = self.two_phase
         ndim = self.ndim
         dt = float(self.dt)

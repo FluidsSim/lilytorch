@@ -1897,6 +1897,20 @@ class FluidSolver(PlottingMixin):
             # bdim_apply kernel every step (so no stale-cell hazard).
             self._mw_div_corr_persist = torch.zeros(gs, device=device, dtype=dtype)
 
+    def _momentum_viscosity(self, *vels):
+        """Effective single-phase viscosity for the momentum step."""
+        nu_extra = self._compute_nu_t(*vels)
+        if nu_extra is None:
+            return None
+        ref = vels[0]
+        if (getattr(self, '_nu_eff_graph', None) is None
+                or self._nu_eff_graph.shape != ref.shape
+                or self._nu_eff_graph.dtype != ref.dtype
+                or self._nu_eff_graph.device != ref.device):
+            self._nu_eff_graph = torch.empty_like(ref)
+        torch.add(float(self.nu), nu_extra, out=self._nu_eff_graph)
+        return self._nu_eff_graph
+
     # ── Fused BDIM step (2-D): native bdim_apply ──────────────────────────
     def _fluid_step_fused_2d(self, u, v, p, timestep):
         """2-D fused fluid step: a single native kernel (``bdim_apply_2d``)
@@ -1955,23 +1969,13 @@ class FluidSolver(PlottingMixin):
         # total effective viscosity nu_eff = nu + nu_t in a persistent
         # buffer.  The torch.add is cheap on CPU; on CUDA it runs before
         # graph capture and synchronises implicitly.
-        _nu_t_field = self._compute_nu_t(u, v)
-        if _nu_t_field is not None:
-            if (getattr(self, '_nu_eff_graph', None) is None
-                    or self._nu_eff_graph.shape != u.shape
-                    or self._nu_eff_graph.dtype != u.dtype
-                    or self._nu_eff_graph.device != u.device):
-                self._nu_eff_graph = torch.empty_like(u)
-            torch.add(float(self.nu), _nu_t_field, out=self._nu_eff_graph)
-            _nu_eff = self._nu_eff_graph
-        else:
-            _nu_eff = None
+        _nu_eff = self._momentum_viscosity(u, v)
 
         # ── Core pre-projection operations (always the same) ─────
         # advection + diffusion + BDIM forcing + set_BCs — all native.
         # The runner dispatches to either graph replay or eager launch.
         def _run_preproj():
-            primes_loc = self.adv_diff_solver.solve(u, v, nu_eff=_nu_eff)
+            primes_loc = self._advect_momentum(u, v, nu_eff=_nu_eff)
             bdim_apply_2d(
                 primes_loc[0], primes_loc[1],
                 sdf_u, sdf_v,
@@ -2104,23 +2108,13 @@ class FluidSolver(PlottingMixin):
         # total effective viscosity nu_eff = nu + nu_t in a persistent
         # buffer.  The torch.add is cheap on CPU; on CUDA it runs before
         # graph capture and synchronises implicitly.
-        _nu_t_field = self._compute_nu_t(u, v, w_vel)
-        if _nu_t_field is not None:
-            if (getattr(self, '_nu_eff_graph', None) is None
-                    or self._nu_eff_graph.shape != u.shape
-                    or self._nu_eff_graph.dtype != u.dtype
-                    or self._nu_eff_graph.device != u.device):
-                self._nu_eff_graph = torch.empty_like(u)
-            torch.add(float(self.nu), _nu_t_field, out=self._nu_eff_graph)
-            _nu_eff = self._nu_eff_graph
-        else:
-            _nu_eff = None
+        _nu_eff = self._momentum_viscosity(u, v, w_vel)
 
         # ── Core pre-projection operations (always the same) ─────
         # advection + diffusion + BDIM forcing + set_BCs — all native.
         # The runner dispatches to either graph replay or eager launch.
         def _run_preproj():
-            primes_loc = self.adv_diff_solver.solve(
+            primes_loc = self._advect_momentum(
                 u, v, w_vel, nu_eff=_nu_eff)
             bdim_apply_3d(
                 primes_loc[0], primes_loc[1], primes_loc[2],
@@ -2207,6 +2201,20 @@ class FluidSolver(PlottingMixin):
         self.adv_diff_solver.set_BCs(*vels_out)
 
         return (*vels_out, p_out)
+
+    def _advect_momentum(self, *vel, nu_eff=None):
+        """Momentum-transport hook inside the fused pre-projection region.
+
+        Returns the predictor velocities after advection + diffusion.  The
+        default is the scheme-agnostic advection-diffusion solve;
+        :class:`~lilytorch.src.two_phase_solver.TwoPhaseSolver` overrides it
+        with consistent conservative ``rho*u`` transport when
+        ``two_phase.consistent_momentum`` is on.
+
+        Called from inside the CUDA-graph capture, so any override must be
+        launch-only: no allocation, no ``.item()``, no host sync.
+        """
+        return self.adv_diff_solver.solve(*vel, nu_eff=nu_eff)
 
     def fluid_step(self, *args):
         """One FSI fluid step (advect-BDIM-project).  Called by BDIMhandler.
