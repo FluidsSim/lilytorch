@@ -41,8 +41,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
 
     // NOTE (2.4): the BDIM-σ ops (bdim_coeff_sigma_{2,3}d) were removed with
     // the packed-key union path — their body-id input existed only as the
-    // packed-key winner.  If BDIM-σ (Lauber et al. 2022) is revived, have the
-    // Regime-B resolve kernel emit a per-cell winner body-id field instead.
+    // packed-key winner.  If BDIM-σ (Lauber et al. 2022) is revived, it can
+    // consume the ``owner_cc`` field the Regime-B resolve kernel now emits.
     // NOTE (CL2/CLx): the bdim_coeff_{2,3}d ops were removed — superseded by
     // bdim_apply_{2,3}d which adds the Maertens-Weymouth body-divergence
     // correction.  The live BDIM ops live in bdim_apply.cu / bdim_apply.cpp.
@@ -62,6 +62,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float sample_offset_pressure, float sample_offset_friction,"
         " float h3,"
         " int delta_order, int force_submethod, float ph_tau,"
+        " Tensor owner_cc,"
         " Tensor(a!) out"
         ") -> ()");
 
@@ -84,6 +85,10 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // the per-body grow-only slab capacities.  active_idx selects which
     // bodies the MIN stage restreams; the resolve stage always sweeps all B,
     // so a skipped (static) body still contributes its earlier slab.
+    // ``owner_cc`` (int32, grid-sized) receives the CELL-CENTRE argmin — the
+    // body index that won the union min there, -1 where no body covers the
+    // cell.  It is written exactly where sdf_cc is, so it inherits the same
+    // dirty-region staleness.  Pass a size<=1 tensor to skip it.
     m.def(
         "streaming_sdf_stag_2d_resolve("
         "Tensor F_flat, Tensor F_offsets,"
@@ -99,6 +104,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(f!) priv_sdf_cc, Tensor(g!) priv_sdf_u, Tensor(h!) priv_sdf_v,"
         " Tensor(i!) priv_body_u, Tensor(j!) priv_body_v,"
         " Tensor active_idx,"
+        " Tensor(k!) owner_cc,"
         " float blend_eps"
         ") -> ()");
 
@@ -118,6 +124,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(h!) priv_sdf_cc, Tensor(i!) priv_sdf_u, Tensor(j!) priv_sdf_v, Tensor(k!) priv_sdf_w,"
         " Tensor(l!) priv_body_u, Tensor(m!) priv_body_v, Tensor(n!) priv_body_w,"
         " Tensor active_idx,"
+        " Tensor(o!) owner_cc,"
         " float blend_eps"
         ") -> ()");
 
@@ -283,6 +290,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float sample_offset_pressure, float sample_offset_friction,"
         " float h2,"
         " int delta_order, int force_submethod, float ph_tau,"
+        " Tensor owner_cc,"
         " Tensor(a!) out"
         ") -> ()");
 

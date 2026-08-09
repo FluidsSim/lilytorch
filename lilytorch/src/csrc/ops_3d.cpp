@@ -426,6 +426,7 @@ void streaming_sdf_forces_post_3d_cpu(
     const int64_t delta_order,
     const int64_t force_submethod,
     const double ph_tau,
+    const at::Tensor& owner_cc,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -433,6 +434,9 @@ void streaming_sdf_forces_post_3d_cpu(
     TORCH_CHECK(out.scalar_type() == at::kDouble, "streaming_sdf_forces_post_3d_cpu: out must be float64");
     const int Ngx = (int)gx.numel(), Ngy = (int)gy.numel(), Ngz = (int)gz.numel();
     const int64_t nr_size = nu_rho_field.numel();
+    // A size<=1 tensor means "no owner field" -> recompute the argmin here.
+    const int32_t* owner = (owner_cc.numel() > 1)
+        ? owner_cc.data_ptr<int32_t>() : nullptr;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_forces_post_3d_cpu", [&] {
         const scalar_t* F_ptr=F_flat.data_ptr<scalar_t>();
@@ -517,7 +521,12 @@ void streaming_sdf_forces_post_3d_cpu(
                 const int di=local/(Aj*Ak), rem=local-di*(Aj*Ak), dj=rem/Ak, dk=rem-dj*Ak;
                 const int i=i0+di,j=j0+dj,k=k0+dk; const int64_t g=((int64_t)i*Ngy+j)*Ngz+k;
                 const scalar_t xc=gx_ptr[i], yc=gy_ptr[j], zc=gz_ptr[k];
-                scalar_t gpx=0,gpy=0,gpz=0,gvx=0,gvy=0,gvz=0,meas_p=0,meas_v=0; bool has_p,has_v;
+                scalar_t gpx=0,gpy=0,gpz=0,gvx=0,gvy=0,gvz=0,meas_p=0,meas_v=0;
+                bool has_p=false,has_v=false;
+                // Ownership gate, FIRST — see the CUDA kernel: under the hard
+                // partition an unowned cell contributes nothing, and skipping
+                // here avoids both Heaviside gradients and the strain block.
+                if(owner!=nullptr && !soft && owner[g]!=b) continue;
                 if(!body_normal){
                     hgrad(i,j,k,off_pres,gpx,gpy,gpz); hgrad(i,j,k,off_visc,gvx,gvy,gvz);
                     has_p=(gpx!=(scalar_t)0||gpy!=(scalar_t)0||gpz!=(scalar_t)0);
@@ -533,9 +542,13 @@ void streaming_sdf_forces_post_3d_cpu(
                 if(!(has_p||has_v)) continue;
                 const scalar_t dxw=xc-Kb[9],dyw=yc-Kb[10],dzw=zc-Kb[11];
                 const scalar_t bxq=Kb[0]*dxw+Kb[1]*dyw+Kb[2]*dzw, byq=Kb[3]*dxw+Kb[4]*dyw+Kb[5]*dzw, bzq=Kb[6]*dxw+Kb[7]*dyw+Kb[8]*dzw;
-                scalar_t s_bself;
+                // With a hard partition the winner comes from owner_cc, so this
+                // body's own phi is needed only for the soft weight (and for
+                // the per-body normal, which body_normal computes anyway).
+                const bool need_self = soft || (owner == nullptr);
+                scalar_t s_bself=0;
                 if(!body_normal){
-                    s_bself=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mxb,Myb,Mzb,Mb[0],Mb[1],Mb[2],Mb[6],Mb[7],Mb[8],bxq,byq,bzq);
+                    if(need_self) s_bself=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mxb,Myb,Mzb,Mb[0],Mb[1],Mb[2],Mb[6],Mb[7],Mb[8],bxq,byq,bzq);
                 } else {
                     scalar_t gbx,gby,gbz; s_bself=trigrad(Fb,Mxb,Myb,Mzb,Mb[0],Mb[1],Mb[2],Mb[6],Mb[7],Mb[8],bxq,byq,bzq,gbx,gby,gbz);
                     scalar_t nbx=gbx*Kb[0]+gby*Kb[3]+gbz*Kb[6], nby=gbx*Kb[1]+gby*Kb[4]+gbz*Kb[7], nbz=gbx*Kb[2]+gby*Kb[5]+gbz*Kb[8];
@@ -548,6 +561,9 @@ void streaming_sdf_forces_post_3d_cpu(
                     scalar_t Z=0;
                     for(int c=0;c<B;++c){ if(!covers(c,i,j,k)) continue; const scalar_t s_c=(c==b)?s_bself:phi_c(c,i,j,k); Z+=(scalar_t)1/((scalar_t)1+std::exp(s_c*inv_blend)); }
                     if(Z>(scalar_t)0) wb=((scalar_t)1/((scalar_t)1+std::exp(s_bself*inv_blend)))/Z;
+                } else if(owner!=nullptr){
+                    // hard winner, read from the union the resolve stage built
+                    wb=(owner[g]==b)?(scalar_t)1:(scalar_t)0;
                 } else {
                     scalar_t smin=(scalar_t)1e30; int bmin=-1;
                     for(int c=0;c<B;++c){ if(!covers(c,i,j,k)) continue; const scalar_t s_c=(c==b)?s_bself:phi_c(c,i,j,k); if(s_c<smin){smin=s_c;bmin=c;} }

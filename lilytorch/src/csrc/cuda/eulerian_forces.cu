@@ -111,7 +111,8 @@ __global__ void forces_post_union_blend_2d_kernel(
     const int64_t* __restrict__ aabb_lo, const int64_t* __restrict__ aabb_dim,
     const scalar_t* __restrict__ gx, const scalar_t* __restrict__ gy,
     const int Ngx, const int Ngy,
-    const scalar_t* __restrict__ sdf_cc, const int interp_method,
+    const scalar_t* __restrict__ sdf_cc,
+    const int32_t* __restrict__ owner_cc, const int interp_method,
     const scalar_t* __restrict__ u_prev, const scalar_t* __restrict__ v_prev,
     const scalar_t* __restrict__ p_prev,
     const scalar_t* __restrict__ nu_rho_field, const int64_t nu_rho_field_size,
@@ -133,8 +134,13 @@ __global__ void forces_post_union_blend_2d_kernel(
         const int g_idx = i * Ngy + j;
 
         scalar_t gpx = 0, gpy = 0, gvx = 0, gvy = 0, meas_p = 0, meas_v = 0;
-        bool has_p, has_v;
-        if (!BODY_NORMAL) {
+        bool has_p = false, has_v = false;
+        // Ownership gate, FIRST — see the 3-D kernel for why the order matters.
+        const bool owned = (owner_cc == nullptr) || (blend_eps > (scalar_t)0)
+                           || (owner_cc[g_idx] == b);
+        if (!owned) {
+            // nothing to do for this (body, cell)
+        } else if (!BODY_NORMAL) {
             heaviside_grad_2d<scalar_t>(sdf_cc, Ngx, Ngy, i, j, off_pres, inv_eps, inv_h, gpx, gpy);
             heaviside_grad_2d<scalar_t>(sdf_cc, Ngx, Ngy, i, j, off_visc, inv_eps, inv_h, gvx, gvy);
             has_p = (gpx != (scalar_t)0 || gpy != (scalar_t)0);
@@ -160,9 +166,15 @@ __global__ void forces_post_union_blend_2d_kernel(
             const scalar_t* Kb = kin + b*11;
             const scalar_t dxw = xc - Kb[4], dyw = yc - Kb[5];
             const scalar_t bxq = Kb[0]*dxw + Kb[1]*dyw, byq = Kb[2]*dxw + Kb[3]*dyw;
-            scalar_t s_bself;
+            const bool soft = blend_eps > (scalar_t)0;
+            // See the 3-D kernel: with a hard partition the winner is read
+            // from owner_cc, so this body's own phi is only needed for the
+            // soft weight (BODY_NORMAL computes it regardless, for the normal).
+            const bool need_self = soft || (owner_cc == nullptr);
+            scalar_t s_bself = 0;
             if (!BODY_NORMAL) {
-                s_bself = sdf_sample_dispatch_2d(interp_method, Fb, Mxb, Myb, Mb[0], Mb[1], Mb[4], Mb[5], bxq, byq);
+                if (need_self)
+                    s_bself = sdf_sample_dispatch_2d(interp_method, Fb, Mxb, Myb, Mb[0], Mb[1], Mb[4], Mb[5], bxq, byq);
             } else {
                 scalar_t gbx, gby;
                 s_bself = bilinear_sample_grad_uniform_2d(Fb, Mxb, Myb, Mb[0], Mb[1], Mb[4], Mb[5], bxq, byq, gbx, gby);
@@ -172,7 +184,6 @@ __global__ void forces_post_union_blend_2d_kernel(
                 nbx *= invn; nby *= invn;
                 gpx = meas_p*nbx; gpy = meas_p*nby; gvx = meas_v*nbx; gvy = meas_v*nby;
             }
-            const bool soft = blend_eps > (scalar_t)0;
             const scalar_t inv_blend = soft ? ((scalar_t)1/blend_eps) : (scalar_t)0;
             scalar_t wb = 0;
             if (soft) {
@@ -193,6 +204,9 @@ __global__ void forces_post_union_blend_2d_kernel(
                     Z += (scalar_t)1 / ((scalar_t)1 + exp(s_c * inv_blend));
                 }
                 if (Z > (scalar_t)0) wb = ((scalar_t)1 / ((scalar_t)1 + exp(s_bself * inv_blend))) / Z;
+            } else if (owner_cc != nullptr) {
+                // hard winner, read from the union the resolve kernel built
+                wb = (owner_cc[g_idx] == b) ? (scalar_t)1 : (scalar_t)0;
             } else {
                 scalar_t smin = (scalar_t)1e30; int bmin = -1;
                 for (int c = 0; c < B; ++c) {
@@ -294,6 +308,7 @@ void streaming_sdf_forces_post_2d_cuda(
     const int64_t delta_order,
     const int64_t force_submethod,
     const double ph_tau,
+    const at::Tensor& owner_cc,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -302,6 +317,9 @@ void streaming_sdf_forces_post_2d_cuda(
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int Ngx = (int)gx.numel();
     const int Ngy = (int)gy.numel();
+    // A size<=1 tensor means "no owner field" -> recompute the argmin here.
+    const int32_t* owner_ptr = (owner_cc.numel() > 1)
+        ? owner_cc.data_ptr<int32_t>() : nullptr;
 
     if (force_submethod == 0 || force_submethod == 2) {
         // UNIFIED union-measure + partition readout (2-D twin of the 3-D path):
@@ -322,7 +340,7 @@ void streaming_sdf_forces_post_2d_cuda(
                         kin.data_ptr<scalar_t>(), aabb_lo.data_ptr<int64_t>(),
                         aabb_dim.data_ptr<int64_t>(), gx.data_ptr<scalar_t>(),
                         gy.data_ptr<scalar_t>(), Ngx, Ngy,
-                        sdf_cc.data_ptr<scalar_t>(), (int)interp_method,
+                        sdf_cc.data_ptr<scalar_t>(), owner_ptr, (int)interp_method,
                         u_prev.data_ptr<scalar_t>(), v_prev.data_ptr<scalar_t>(),
                         p_prev.data_ptr<scalar_t>(),
                         nu_rho_field.data_ptr<scalar_t>(), (int64_t)nu_rho_field.numel(),
@@ -486,6 +504,20 @@ __device__ __forceinline__ scalar_t trilinear_sample_grad_uniform(
 //  set, and body b's thread adds only its own share w_b*f -> Sum over threads
 //  reconstructs the full cell force with no double counting.  Strain is
 //  recomputed per (body,cell).
+//
+//  HARD partition (blend_eps <= 0): the winner is READ from ``owner_cc``, the
+//  argmin the streaming resolve kernel already computed when it built the
+//  union.  Recomputing it here was both redundant (a per-cell sweep re-sampling
+//  every candidate body's SDF brick) and WRONG: the candidate list was the
+//  force-window ``aabb_dim``, which has force-opted-out bodies zeroed, so a
+//  cell whose interface force belongs to a fixed body (an immersed ramp) could
+//  not be claimed by it and was handed in full to whichever body still covered
+//  it -- an 11 N step onto a link 0.166 m outside the fluid box, in air.  With
+//  owner_cc the opted-out body owns its own cells and no one else can claim
+//  them.  Pass owner_cc = nullptr to fall back to the recompute loop (the
+//  analytical body path, which never runs the resolve kernel).
+//  The SOFT partition is a sigmoid-weighted sum over the whole covering set,
+//  which one index cannot express, so it keeps the loop unconditionally.
 // ----------------------------------------------------------------------
 template <typename scalar_t, int BLOCK_SIZE, bool BODY_NORMAL>
 __global__ void forces_post_union_blend_3d_kernel(
@@ -501,6 +533,7 @@ __global__ void forces_post_union_blend_3d_kernel(
     const scalar_t* __restrict__ gz,
     const int Ngx, const int Ngy, const int Ngz,
     const scalar_t* __restrict__ sdf_cc,
+    const int32_t* __restrict__ owner_cc,
     const int interp_method,
     const scalar_t* __restrict__ u_prev,
     const scalar_t* __restrict__ v_prev,
@@ -548,8 +581,22 @@ __global__ void forces_post_union_blend_3d_kernel(
         //   SDF normal n_b (computed below), giving accurate per-link forces.
         scalar_t gpx = 0, gpy = 0, gpz = 0, gvx = 0, gvy = 0, gvz = 0;
         scalar_t meas_p = 0, meas_v = 0;   // BODY_NORMAL scalar measures
-        bool has_p, has_v;
-        if (!BODY_NORMAL) {
+        bool has_p = false, has_v = false;
+        // ---- ownership gate, FIRST -----------------------------------
+        // Under the hard partition a cell this body does not own contributes
+        // exactly zero, and owner_cc answers that in one int32 load.  Testing
+        // it here rather than after the measure is what makes the field a
+        // speed-up and not just a correctness fix: it skips the two Heaviside
+        // gradients (~14 sdf_cc loads + 2 sin each) and, downstream, the whole
+        // strain-rate block (~40 velocity loads).  With B overlapping links
+        // most (body, cell) pairs are NOT owned, so this is the common case.
+        // Leaving has_p/has_v false makes every branch below fall through with
+        // acc = 0; the block reduce still runs, as it must.
+        const bool owned = (owner_cc == nullptr) || (blend_eps > (scalar_t)0)
+                           || (owner_cc[g_idx] == b);
+        if (!owned) {
+            // nothing to do for this (body, cell)
+        } else if (!BODY_NORMAL) {
             heaviside_grad_3d<scalar_t>(sdf_cc, Ngx, Ngy, Ngz, i, j, k,
                                         off_pres, inv_eps, inv_h, gpx, gpy, gpz);
             heaviside_grad_3d<scalar_t>(sdf_cc, Ngx, Ngy, Ngz, i, j, k,
@@ -590,11 +637,18 @@ __global__ void forces_post_union_blend_3d_kernel(
                 const scalar_t bxq = Kb[0]*dxw + Kb[1]*dyw + Kb[2]*dzw;
                 const scalar_t byq = Kb[3]*dxw + Kb[4]*dyw + Kb[5]*dzw;
                 const scalar_t bzq = Kb[6]*dxw + Kb[7]*dyw + Kb[8]*dzw;
-                scalar_t s_bself;
+                // ---- partition weight for THIS body over the covering set ----
+                const bool soft = blend_eps > (scalar_t)0;
+                // With a hard partition the winner comes from owner_cc, so
+                // this body's own phi is needed only for the soft weight (and
+                // for the per-body normal, which BODY_NORMAL computes anyway).
+                const bool need_self = soft || (owner_cc == nullptr);
+                scalar_t s_bself = 0;
                 if (!BODY_NORMAL) {
-                    s_bself = sdf_sample_dispatch(interp_method, Fb,
-                        Mxb, Myb, Mzb, Mb[0], Mb[1], Mb[2], Mb[6], Mb[7], Mb[8],
-                        bxq, byq, bzq);
+                    if (need_self)
+                        s_bself = sdf_sample_dispatch(interp_method, Fb,
+                            Mxb, Myb, Mzb, Mb[0], Mb[1], Mb[2], Mb[6], Mb[7], Mb[8],
+                            bxq, byq, bzq);
                 } else {
                     // fused value + analytic body-frame SDF gradient (one stencil load)
                     scalar_t gbx, gby, gbz;
@@ -613,8 +667,6 @@ __global__ void forces_post_union_blend_3d_kernel(
                     gvx = meas_v * nbx; gvy = meas_v * nby; gvz = meas_v * nbz;
                 }
 
-                // ---- partition weight for THIS body over the covering set ----
-                const bool soft = blend_eps > (scalar_t)0;
                 const scalar_t inv_blend = soft ? ((scalar_t)1 / blend_eps) : (scalar_t)0;
                 scalar_t wb = 0;
                 if (soft) {
@@ -641,6 +693,9 @@ __global__ void forces_post_union_blend_3d_kernel(
                     }
                     if (Z > (scalar_t)0)
                         wb = ((scalar_t)1 / ((scalar_t)1 + exp(s_bself * inv_blend))) / Z;
+                } else if (owner_cc != nullptr) {
+                    // hard winner, read from the union the resolve kernel built
+                    wb = (owner_cc[g_idx] == b) ? (scalar_t)1 : (scalar_t)0;
                 } else {
                     // hard nearest-body winner over the covering set
                     scalar_t smin = (scalar_t)1e30; int bmin = -1;
@@ -826,6 +881,7 @@ void streaming_sdf_forces_post_3d_cuda(
     const int64_t delta_order,
     const int64_t force_submethod,
     const double ph_tau,
+    const at::Tensor& owner_cc,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -835,6 +891,9 @@ void streaming_sdf_forces_post_3d_cuda(
     const int Ngx = (int)gx.numel();
     const int Ngy = (int)gy.numel();
     const int Ngz = (int)gz.numel();
+    // A size<=1 tensor means "no owner field" -> recompute the argmin here.
+    const int32_t* owner_ptr = (owner_cc.numel() > 1)
+        ? owner_cc.data_ptr<int32_t>() : nullptr;
 
     if (force_submethod == 0 || force_submethod == 2) {
         // UNIFIED union-measure + partition readout (the fixed ndelta): BOTH
@@ -863,7 +922,7 @@ void streaming_sdf_forces_post_3d_cuda(
                         kin.data_ptr<scalar_t>(), aabb_lo.data_ptr<int64_t>(),
                         aabb_dim.data_ptr<int64_t>(), gx.data_ptr<scalar_t>(),
                         gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(), Ngx, Ngy, Ngz,
-                        sdf_cc.data_ptr<scalar_t>(), (int)interp_method,
+                        sdf_cc.data_ptr<scalar_t>(), owner_ptr, (int)interp_method,
                         u.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
                         w.data_ptr<scalar_t>(), p.data_ptr<scalar_t>(),
                         nu_rho_field.data_ptr<scalar_t>(), (int64_t)nu_rho_field.numel(),

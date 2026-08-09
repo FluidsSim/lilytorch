@@ -42,6 +42,22 @@ _METHOD_MAP = {"linear": 0, "quadratic": 1}
 # Persistent dummy for mw-off sdf_cc/div_corr (mirrors bdim._mw_dummy).
 _MW_DUMMY_NATIVE: dict = {}
 
+# Persistent 1-element int32 placeholder standing in for an absent ``owner_cc``.
+# The kernels test ``numel() > 1``, so this is how a caller says "no owner
+# field" without the schema needing an optional tensor.
+_OWNER_DUMMY_NATIVE: dict = {}
+
+
+def _owner_or_dummy(owner_cc, ref: torch.Tensor) -> torch.Tensor:
+    """``owner_cc``, or the persistent no-owner placeholder on ``ref``'s device."""
+    if owner_cc is not None:
+        return owner_cc
+    d = _OWNER_DUMMY_NATIVE.get(ref.device)
+    if d is None:
+        d = torch.zeros(1, dtype=torch.int32, device=ref.device)
+        _OWNER_DUMMY_NATIVE[ref.device] = d
+    return d
+
 
 def _mw_dummy_native(u0: torch.Tensor) -> torch.Tensor:
     """Persistent 1-element zero placeholder for ``sdf_cc``/``div_corr`` when
@@ -68,7 +84,8 @@ def streaming_sdf_forces_post_3d(
         h3: float,
         delta_order: int,
         out: Tensor,
-        force_submethod: int = 0, ph_tau: float = 0.0) -> None:
+        force_submethod: int = 0, ph_tau: float = 0.0,
+        owner_cc: Tensor = None) -> None:
     """3-D Phase D only: current-union-normal force integration.
 
     Reuses the streamed body metadata and current union SDF produced by the
@@ -89,6 +106,13 @@ def streaming_sdf_forces_post_3d(
     force to bodies by a softmin partition of unity whose blend width is carried
     by ``ph_tau`` (metres; ≤0 → hard nearest-body winner).  (Value 1, the old
     deltaH readout, has been removed; there is an intentional numbering gap.)
+
+    ``owner_cc``: the int32 per-cell winning-body field the streaming resolve
+    kernel publishes.  With the HARD partition it replaces the per-cell argmin
+    recompute — which is not merely redundant but wrong, because it re-derived
+    the winner from the FORCE window array, where a force-opted-out body is
+    zeroed and so can never claim its own cells.  ``None`` restores the
+    recompute (the analytical body path, which has no owner field).
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_forces_post_3d.default(
         F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
@@ -98,7 +122,8 @@ def streaming_sdf_forces_post_3d(
         float(eps_body),
         float(sample_offset_pressure), float(sample_offset_friction),
         float(h3), int(delta_order),
-        int(force_submethod), float(ph_tau), out,
+        int(force_submethod), float(ph_tau),
+        _owner_or_dummy(owner_cc, sdf_cc), out,
     )
 
 
@@ -150,6 +175,7 @@ def streaming_sdf_stag_2d_resolve(
         priv_sdf_cc: Tensor, priv_sdf_u: Tensor, priv_sdf_v: Tensor,
         priv_body_u: Tensor, priv_body_v: Tensor,
         active_idx: Tensor,
+        owner_cc: Tensor = None,
         blend_eps: float = 0.0) -> None:
     """2-D Regime-B streaming SDF: per-body private buffers + resolve.
 
@@ -168,6 +194,11 @@ def streaming_sdf_stag_2d_resolve(
     The resolve stage always sweeps all B bodies, so a body left out keeps
     contributing the slab it wrote on an earlier step — which is how a static
     body is skipped without changing the union.
+
+    ``owner_cc``: optional int32 grid-sized output receiving the cell-centre
+    argmin (the winning body index, -1 where uncovered).  Written exactly where
+    ``sdf_cc`` is, so it carries the same dirty-region staleness; the caller
+    owns the per-step reset of the dirty block, as it does for ``sdf_cc``.
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_resolve.default(
         F_flat, F_offsets, body_shapes, body_meta, kin,
@@ -180,6 +211,7 @@ def streaming_sdf_stag_2d_resolve(
         priv_sdf_cc, priv_sdf_u, priv_sdf_v,
         priv_body_u, priv_body_v,
         active_idx,
+        _owner_or_dummy(owner_cc, sdf_cc),
         float(blend_eps),
     )
 
@@ -199,11 +231,12 @@ def streaming_sdf_stag_3d_resolve(
         priv_sdf_cc: Tensor, priv_sdf_u: Tensor, priv_sdf_v: Tensor, priv_sdf_w: Tensor,
         priv_body_u: Tensor, priv_body_v: Tensor, priv_body_w: Tensor,
         active_idx: Tensor,
+        owner_cc: Tensor = None,
         blend_eps: float = 0.0) -> None:
     """3-D Regime-B streaming SDF: per-body private buffers + resolve.
 
     See :func:`streaming_sdf_stag_2d_resolve` for the pipeline description
-    (including the ``blend_eps > 0`` softmin velocity blend).
+    (including the ``blend_eps > 0`` softmin velocity blend and ``owner_cc``).
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_resolve.default(
         F_flat, F_offsets, body_shapes, body_meta, kin,
@@ -217,6 +250,7 @@ def streaming_sdf_stag_3d_resolve(
         priv_sdf_cc, priv_sdf_u, priv_sdf_v, priv_sdf_w,
         priv_body_u, priv_body_v, priv_body_w,
         active_idx,
+        _owner_or_dummy(owner_cc, sdf_cc),
         float(blend_eps),
     )
 
@@ -392,7 +426,8 @@ def streaming_sdf_forces_post_2d(
         h2: float,
         delta_order: int,
         out: Tensor,
-        force_submethod: int = 0, ph_tau: float = 0.0) -> None:
+        force_submethod: int = 0, ph_tau: float = 0.0,
+        owner_cc: Tensor = None) -> None:
     """2-D Phase D only: current-union-normal force integration.
 
     Reuses the streamed body metadata and current union SDF produced by
@@ -408,6 +443,8 @@ def streaming_sdf_forces_post_2d(
     force to bodies by a softmin partition of unity whose blend width is carried
     by ``ph_tau`` (metres; ≤0 → hard nearest-body winner).  (Value 1, the old
     deltaH readout, has been removed; there is an intentional numbering gap.)
+
+    ``owner_cc``: see ``streaming_sdf_forces_post_3d``.
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_forces_post_2d.default(
         F_flat, F_offsets,
@@ -422,7 +459,7 @@ def streaming_sdf_forces_post_2d(
         float(sample_offset_pressure), float(sample_offset_friction),
         float(h2), int(delta_order),
         int(force_submethod), float(ph_tau),
-        out,
+        _owner_or_dummy(owner_cc, sdf_cc), out,
     )
 
 
@@ -1179,6 +1216,29 @@ _priv_cache: dict = {}
 _PRIV_ALIGN = 32
 
 
+def _check_vols(vols, aabb_dim):
+    """Reject a ``vols`` that does not carry ONE volume per body.
+
+    ``vols`` sets the private-buffer layout, but the resolve kernel sweeps
+    ``B = aabb_dim.size(0)`` bodies and indexes ``priv_offsets[b]`` for each.
+    A short ``vols`` therefore reads ``priv_offsets`` past its end and
+    dereferences the garbage as a buffer offset — an illegal device access
+    that surfaces later, on an unrelated call, with the CUDA context already
+    poisoned.  Cheap host-side check, so it fails here with a readable message
+    instead.  (Passing the scalar ``max_vol`` here, as the pre-per-body-caps
+    signature took, is exactly how that happened.)
+    """
+    n = np.asarray(vols, dtype=np.int64).reshape(-1).size
+    B = int(aabb_dim.size(0))
+    if n != B:
+        raise ValueError(
+            f"body_update: vols has {n} entr{'y' if n == 1 else 'ies'} but "
+            f"there are {B} bodies.  vols must hold the per-body AABB volume "
+            f"for every body (BDIMhandler passes kstep['caps']); it is no "
+            f"longer the scalar max volume."
+        )
+
+
 def _regime_b_priv(vols, dtype, device, ndim):
     """Sync-free private buffers + CUMULATIVE offsets for the Regime-B resolve.
 
@@ -1235,12 +1295,13 @@ def body_update_2d(
     sdf_cc, sdf_u, sdf_v, body_u, body_v,
     interp_method,
     dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-    blend_eps=0.0, active_idx=None,
+    blend_eps=0.0, active_idx=None, owner_cc=None,
 ):
     """Native 2-D streaming SDF body update (eager path).
 
-    The caller (BDIMhandler) pre-fills ``sdf_*`` to +FAR and ``body_*`` to 0
-    before every call — the kernels only write body-covered cells.
+    The caller (BDIMhandler) pre-fills ``sdf_*`` to +FAR, ``body_*`` to 0 and
+    ``owner_cc`` to -1 before every call — the kernels only write body-covered
+    cells.
 
     ``vols`` is the host per-body AABB volume array.  ``active_idx`` selects
     which bodies the min-kernel restreams; ``None`` means all of them.  The
@@ -1248,6 +1309,7 @@ def body_update_2d(
     contributes — from the slab it wrote on an earlier step.  Returns the
     ``layout_changed`` flag: True when the private-buffer layout moved, so the
     caller must treat every body as active on the NEXT call too."""
+    _check_vols(vols, aabb_dim)
     priv_offsets, pb, layout_changed = _regime_b_priv(
         vols, sdf_cc.dtype, sdf_cc.device, 2)
     if int(dirty_Ai) * int(dirty_Aj) <= 0:
@@ -1261,6 +1323,7 @@ def body_update_2d(
         int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
         priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4],
         active_idx,
+        owner_cc=owner_cc,
         blend_eps=float(blend_eps),
     )
     return layout_changed
@@ -1273,9 +1336,10 @@ def body_update_3d(
     interp_method,
     dirty_i0, dirty_j0, dirty_k0,
     dirty_Ai, dirty_Aj, dirty_Ak,
-    blend_eps=0.0, active_idx=None,
+    blend_eps=0.0, active_idx=None, owner_cc=None,
 ):
     """Native 3-D streaming SDF body update (eager path).  See 2-D."""
+    _check_vols(vols, aabb_dim)
     priv_offsets, pb, layout_changed = _regime_b_priv(
         vols, sdf_cc.dtype, sdf_cc.device, 3)
     if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
@@ -1290,6 +1354,7 @@ def body_update_3d(
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
         priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6],
         active_idx,
+        owner_cc=owner_cc,
         blend_eps=float(blend_eps),
     )
     return layout_changed

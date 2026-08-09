@@ -24,6 +24,14 @@
 //  contributing the slab it wrote on an earlier step, which is how a STATIC
 //  body is skipped without changing the union.  Because the capacities are
 //  grow-only, priv_offsets is stable across steps and those slabs stay put.
+//
+//  The resolve kernel also publishes ``owner_cc``: the int32 body index that
+//  won the CELL-CENTRE min, or -1 where no body covers the cell.  It is the
+//  argmin the kernel already computes for ``win_cc``, so recording it is free,
+//  and it lets the post-step force readout split the union force by table
+//  lookup instead of recomputing the same argmin per (body, cell).  Because it
+//  is written exactly where ``sdf_cc`` is written, it inherits sdf_cc's dirty-
+//  region staleness semantics unchanged.  Pass a size<=1 tensor to skip it.
 // =====================================================================
 
 #include <ATen/Operators.h>
@@ -108,6 +116,7 @@ __global__ void regime_b_resolve_kernel_2d(
     const scalar_t* __restrict__ priv_body_u, const scalar_t* __restrict__ priv_body_v,
     scalar_t* __restrict__ sdf_cc, scalar_t* __restrict__ sdf_u, scalar_t* __restrict__ sdf_v,
     scalar_t* __restrict__ body_u, scalar_t* __restrict__ body_v,
+    int32_t* __restrict__ owner_cc,
     const scalar_t blend_eps)
 {
     int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -125,6 +134,7 @@ __global__ void regime_b_resolve_kernel_2d(
     // Velocity follows each stagger's own winner (or the softmin blend).
     scalar_t best_cc = (scalar_t)1e4, best_u = (scalar_t)1e4, best_v = (scalar_t)1e4;
     int64_t win_cc = -1, win_u = -1, win_v = -1;
+    int win_cc_body = -1;   // the cell-centre argmin, published as owner_cc
 
     // Softmin velocity blend (mirrors the _multi min-kernel/decode pair):
     // w_i = sigmoid(-s_i/blend_eps) per stagger; accumulated in registers
@@ -143,7 +153,7 @@ __global__ void regime_b_resolve_kernel_2d(
         const scalar_t s_cc = priv_sdf_cc[idx];
         const scalar_t s_u  = priv_sdf_u[idx];
         const scalar_t s_v  = priv_sdf_v[idx];
-        if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; }
+        if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; win_cc_body = b; }
         if (s_u  < best_u)  { best_u  = s_u;  win_u  = idx; }
         if (s_v  < best_v)  { best_v  = s_v;  win_v  = idx; }
         if (blend) {
@@ -163,8 +173,9 @@ __global__ void regime_b_resolve_kernel_2d(
                                                    : priv_body_u[win_u];
         body_v[g_idx] = (blend && den_v > den_tol) ? num_v / den_v
                                                    : priv_body_v[win_v];
+        if (owner_cc) owner_cc[g_idx] = win_cc_body;
     }
-    // else: cell not covered by any body → keep pre-existing values (FAR/0)
+    // else: cell not covered by any body → keep pre-existing values (FAR/0/-1)
 }
 
 
@@ -249,6 +260,7 @@ __global__ void regime_b_resolve_kernel_3d(
     const scalar_t* __restrict__ priv_body_u, const scalar_t* __restrict__ priv_body_v, const scalar_t* __restrict__ priv_body_w,
     scalar_t* __restrict__ sdf_cc, scalar_t* __restrict__ sdf_u, scalar_t* __restrict__ sdf_v, scalar_t* __restrict__ sdf_w,
     scalar_t* __restrict__ body_u, scalar_t* __restrict__ body_v, scalar_t* __restrict__ body_w,
+    int32_t* __restrict__ owner_cc,
     const scalar_t blend_eps)
 {
     int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -264,6 +276,7 @@ __global__ void regime_b_resolve_kernel_3d(
     scalar_t best_cc = (scalar_t)1e4, best_u = (scalar_t)1e4,
              best_v = (scalar_t)1e4,  best_w = (scalar_t)1e4;
     int64_t win_cc = -1, win_u = -1, win_v = -1, win_w = -1;
+    int win_cc_body = -1;   // the cell-centre argmin, published as owner_cc
 
     // Softmin velocity blend — see the 2-D resolve kernel note.
     const bool blend = blend_eps > scalar_t(0);
@@ -280,7 +293,7 @@ __global__ void regime_b_resolve_kernel_3d(
         const scalar_t s_u  = priv_sdf_u[idx];
         const scalar_t s_v  = priv_sdf_v[idx];
         const scalar_t s_w  = priv_sdf_w[idx];
-        if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; }
+        if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; win_cc_body = b; }
         if (s_u  < best_u)  { best_u  = s_u;  win_u  = idx; }
         if (s_v  < best_v)  { best_v  = s_v;  win_v  = idx; }
         if (s_w  < best_w)  { best_w  = s_w;  win_w  = idx; }
@@ -306,6 +319,7 @@ __global__ void regime_b_resolve_kernel_3d(
                                                    : priv_body_v[win_v];
         body_w[g_idx] = (blend && den_w > den_tol) ? num_w / den_w
                                                    : priv_body_w[win_w];
+        if (owner_cc) owner_cc[g_idx] = win_cc_body;
     }
 }
 
@@ -327,6 +341,7 @@ void streaming_sdf_stag_2d_resolve_cuda(
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v,
     at::Tensor priv_body_u, at::Tensor priv_body_v,
     const at::Tensor& active_idx,
+    at::Tensor owner_cc,
     double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
@@ -335,6 +350,9 @@ void streaming_sdf_stag_2d_resolve_cuda(
     cudaStream_t s = at::cuda::getCurrentCUDAStream();
     int Ngy = (int)gy.numel();
     int64_t dirty_vol = dirty_Ai * dirty_Aj;
+    // A size<=1 tensor is the caller's "owner field not wanted" placeholder.
+    int32_t* owner_ptr = (owner_cc.numel() > 1) ? owner_cc.data_ptr<int32_t>()
+                                                : nullptr;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_2d_resolve", [&] {
         // ----- min-kernel: fanned per-body (active bodies only) -----
@@ -382,6 +400,7 @@ void streaming_sdf_stag_2d_resolve_cuda(
                     priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(),
                     sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(), sdf_v.data_ptr<scalar_t>(),
                     body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(),
+                    owner_ptr,
                     (scalar_t)blend_eps);
             cudaError_t err = cudaGetLastError();
             if (err != cudaSuccess) {
@@ -405,6 +424,7 @@ void streaming_sdf_stag_3d_resolve_cuda(
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v, at::Tensor priv_sdf_w,
     at::Tensor priv_body_u, at::Tensor priv_body_v, at::Tensor priv_body_w,
     const at::Tensor& active_idx,
+    at::Tensor owner_cc,
     double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
@@ -413,6 +433,9 @@ void streaming_sdf_stag_3d_resolve_cuda(
     cudaStream_t s = at::cuda::getCurrentCUDAStream();
     int Ngy = (int)gy.numel(), Ngz = (int)gz.numel();
     int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
+    // A size<=1 tensor is the caller's "owner field not wanted" placeholder.
+    int32_t* owner_ptr = (owner_cc.numel() > 1) ? owner_cc.data_ptr<int32_t>()
+                                                : nullptr;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_3d_resolve", [&] {
         // ----- min-kernel: fanned per-body (active bodies only) -----
@@ -457,6 +480,7 @@ void streaming_sdf_stag_3d_resolve_cuda(
                     priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(), priv_body_w.data_ptr<scalar_t>(),
                     sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(), sdf_v.data_ptr<scalar_t>(), sdf_w.data_ptr<scalar_t>(),
                     body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(), body_w.data_ptr<scalar_t>(),
+                    owner_ptr,
                     (scalar_t)blend_eps);
         }
         AT_CUDA_CHECK(cudaGetLastError());

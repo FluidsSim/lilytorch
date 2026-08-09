@@ -305,6 +305,7 @@ void streaming_sdf_forces_post_2d_cpu(
     const int64_t delta_order,
     const int64_t force_submethod,
     const double ph_tau,
+    const at::Tensor& owner_cc,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -317,6 +318,9 @@ void streaming_sdf_forces_post_2d_cpu(
 
     const int Ngy = (int)gy.numel();
     const int Ngx = (int)gx.numel();
+    // A size<=1 tensor means "no owner field" -> recompute the argmin here.
+    const int32_t* owner = (owner_cc.numel() > 1)
+        ? owner_cc.data_ptr<int32_t>() : nullptr;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_forces_post_2d_cpu", [&] {
         auto F_c   = F_flat.contiguous();
@@ -395,16 +399,26 @@ void streaming_sdf_forces_post_2d_cpu(
             for(int local=0;local<vol;++local){
                 const int di=local/Aj, dj=local-di*Aj; const int i=i0+di,j=j0+dj; const std::int64_t g=(std::int64_t)i*Ngy+j;
                 const scalar_t xc=gx_ptr[i], yc=gy_ptr[j];
-                scalar_t gpx=0,gpy=0,gvx=0,gvy=0,meas_p=0,meas_v=0; bool has_p,has_v;
+                scalar_t gpx=0,gpy=0,gvx=0,gvy=0,meas_p=0,meas_v=0;
+                bool has_p=false,has_v=false;
+                // Ownership gate, FIRST — see the CUDA kernel.
+                if(owner!=nullptr && !soft && owner[g]!=b) continue;
                 if(!body_normal){ hgrad(i,j,off_pres,gpx,gpy); hgrad(i,j,off_visc,gvx,gvy); has_p=(gpx!=(scalar_t)0||gpy!=(scalar_t)0); has_v=(gvx!=(scalar_t)0||gvy!=(scalar_t)0); }
                 else { scalar_t gux,guy; sgrad(i,j,gux,guy); const scalar_t gmag=std::sqrt(gux*gux+guy*guy); const scalar_t phi_u=S2(i,j); const scalar_t ddp=(phi_u-off_pres)*inv_eps,ddv=(phi_u-off_visc)*inv_eps,hie=(scalar_t)0.5*inv_eps; const scalar_t delp=(ddp>(scalar_t)-1&&ddp<(scalar_t)1)?((scalar_t)1+std::cos(pi_v*ddp))*hie:(scalar_t)0; const scalar_t delv=(ddv>(scalar_t)-1&&ddv<(scalar_t)1)?((scalar_t)1+std::cos(pi_v*ddv))*hie:(scalar_t)0; meas_p=delp*gmag; meas_v=delv*gmag; has_p=(meas_p!=(scalar_t)0); has_v=(meas_v!=(scalar_t)0); }
                 if(!(has_p||has_v)) continue;
                 const scalar_t dxw=xc-Kb[4],dyw=yc-Kb[5]; const scalar_t bxq=Kb[0]*dxw+Kb[1]*dyw, byq=Kb[2]*dxw+Kb[3]*dyw;
-                scalar_t s_bself;
-                if(!body_normal){ s_bself=samp2d(Fb,Mxb,Myb,Mb[0],Mb[1],Mb[4],Mb[5],bxq,byq); }
+                // With a hard partition the winner comes from owner_cc, so this
+                // body's own phi is needed only for the soft weight (and for
+                // the per-body normal, which body_normal computes anyway).
+                const bool need_self = soft || (owner == nullptr);
+                scalar_t s_bself=0;
+                if(!body_normal){ if(need_self) s_bself=samp2d(Fb,Mxb,Myb,Mb[0],Mb[1],Mb[4],Mb[5],bxq,byq); }
                 else { scalar_t gbx,gby; s_bself=trigrad(Fb,Mxb,Myb,Mb[0],Mb[1],Mb[4],Mb[5],bxq,byq,gbx,gby); scalar_t nbx=gbx*Kb[0]+gby*Kb[2], nby=gbx*Kb[1]+gby*Kb[3]; const scalar_t nlen=std::sqrt(nbx*nbx+nby*nby); const scalar_t invn=nlen>(scalar_t)0?(scalar_t)1/nlen:(scalar_t)0; nbx*=invn;nby*=invn; gpx=meas_p*nbx;gpy=meas_p*nby;gvx=meas_v*nbx;gvy=meas_v*nby; }
                 scalar_t wb=0;
                 if(soft){ scalar_t Z=0; for(int c=0;c<B;++c){ if(!covers(c,i,j)) continue; const scalar_t s_c=(c==b)?s_bself:phi_c(c,i,j); Z+=(scalar_t)1/((scalar_t)1+std::exp(s_c*inv_blend)); } if(Z>(scalar_t)0) wb=((scalar_t)1/((scalar_t)1+std::exp(s_bself*inv_blend)))/Z; }
+                // hard winner: read from the union the resolve stage built, or
+                // recompute the argmin when there is no owner field.
+                else if(owner!=nullptr){ wb=(owner[g]==b)?(scalar_t)1:(scalar_t)0; }
                 else { scalar_t smin=(scalar_t)1e30; int bmin=-1; for(int c=0;c<B;++c){ if(!covers(c,i,j)) continue; const scalar_t s_c=(c==b)?s_bself:phi_c(c,i,j); if(s_c<smin){smin=s_c;bmin=c;} } wb=(bmin==b)?(scalar_t)1:(scalar_t)0; }
                 if(wb==(scalar_t)0) continue;
                 scalar_t fp_x=0,fp_y=0;

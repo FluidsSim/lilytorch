@@ -104,6 +104,7 @@ static void resolve_stage_2d(
     const scalar_t* priv_body_u, const scalar_t* priv_body_v,
     scalar_t* sdf_cc, scalar_t* sdf_u, scalar_t* sdf_v,
     scalar_t* body_u, scalar_t* body_v,
+    int32_t* owner_cc,
     scalar_t blend_eps)
 {
     int64_t dirty_vol = (int64_t)dirty_Ai * dirty_Aj;
@@ -120,6 +121,7 @@ static void resolve_stage_2d(
             // atomicMin on key_cc/key_u/key_v (see the CUDA resolve kernel).
             scalar_t best_cc = (scalar_t)1e4, best_u = (scalar_t)1e4, best_v = (scalar_t)1e4;
             int64_t win_cc = -1, win_u = -1, win_v = -1;
+            int win_cc_body = -1;   // the cell-centre argmin, published as owner_cc
 
             // Softmin velocity blend (mirrors the _multi min/decode pair):
             // w_i = sigmoid(-s_i/blend_eps) per stagger, accumulated in
@@ -136,7 +138,7 @@ static void resolve_stage_2d(
                 const scalar_t s_cc = priv_sdf_cc[idx];
                 const scalar_t s_u  = priv_sdf_u[idx];
                 const scalar_t s_v  = priv_sdf_v[idx];
-                if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; }
+                if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; win_cc_body = b; }
                 if (s_u  < best_u)  { best_u  = s_u;  win_u  = idx; }
                 if (s_v  < best_v)  { best_v  = s_v;  win_v  = idx; }
                 if (blend) {
@@ -156,6 +158,7 @@ static void resolve_stage_2d(
                                                            : priv_body_u[win_u];
                 body_v[g_idx] = (blend && den_v > den_tol) ? num_v / den_v
                                                            : priv_body_v[win_v];
+                if (owner_cc) owner_cc[g_idx] = win_cc_body;
             }
         }
     });
@@ -250,6 +253,7 @@ static void resolve_stage_3d(
     const scalar_t* priv_body_u, const scalar_t* priv_body_v, const scalar_t* priv_body_w,
     scalar_t* sdf_cc, scalar_t* sdf_u, scalar_t* sdf_v, scalar_t* sdf_w,
     scalar_t* body_u, scalar_t* body_v, scalar_t* body_w,
+    int32_t* owner_cc,
     scalar_t blend_eps)
 {
     int64_t dirty_vol = (int64_t)dirty_Ai * dirty_Aj * dirty_Ak;
@@ -268,6 +272,7 @@ static void resolve_stage_3d(
             scalar_t best_cc = (scalar_t)1e4, best_u = (scalar_t)1e4,
                      best_v = (scalar_t)1e4,  best_w = (scalar_t)1e4;
             int64_t win_cc = -1, win_u = -1, win_v = -1, win_w = -1;
+            int win_cc_body = -1;   // the cell-centre argmin, published as owner_cc
 
             // Softmin velocity blend — see the 2-D resolve-stage note.
             scalar_t num_u = 0, den_u = 0, num_v = 0, den_v = 0, num_w = 0, den_w = 0;
@@ -283,7 +288,7 @@ static void resolve_stage_3d(
                 const scalar_t s_u  = priv_sdf_u[idx];
                 const scalar_t s_v  = priv_sdf_v[idx];
                 const scalar_t s_w  = priv_sdf_w[idx];
-                if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; }
+                if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; win_cc_body = b; }
                 if (s_u  < best_u)  { best_u  = s_u;  win_u  = idx; }
                 if (s_v  < best_v)  { best_v  = s_v;  win_v  = idx; }
                 if (s_w  < best_w)  { best_w  = s_w;  win_w  = idx; }
@@ -309,6 +314,7 @@ static void resolve_stage_3d(
                                                            : priv_body_v[win_v];
                 body_w[g_idx] = (blend && den_w > den_tol) ? num_w / den_w
                                                            : priv_body_w[win_w];
+                if (owner_cc) owner_cc[g_idx] = win_cc_body;
             }
         }
     });
@@ -332,12 +338,16 @@ void streaming_sdf_stag_2d_resolve_cpu(
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v,
     at::Tensor priv_body_u, at::Tensor priv_body_v,
     const at::Tensor& active_idx,
+    at::Tensor owner_cc,
     double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
     if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0) return;
     int n_active = (int)active_idx.numel();
     int Ngy = (int)gy.numel();
+    // A size<=1 tensor is the caller's "owner field not wanted" placeholder.
+    int32_t* owner_ptr = (owner_cc.numel() > 1) ? owner_cc.data_ptr<int32_t>()
+                                                : nullptr;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_2d_resolve_cpu", [&] {
         // Min-stage
@@ -362,6 +372,7 @@ void streaming_sdf_stag_2d_resolve_cpu(
             priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(),
             sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(), sdf_v.data_ptr<scalar_t>(),
             body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(),
+            owner_ptr,
             (scalar_t)blend_eps);
     });
 }
@@ -380,12 +391,16 @@ void streaming_sdf_stag_3d_resolve_cpu(
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v, at::Tensor priv_sdf_w,
     at::Tensor priv_body_u, at::Tensor priv_body_v, at::Tensor priv_body_w,
     const at::Tensor& active_idx,
+    at::Tensor owner_cc,
     double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
     int n_active = (int)active_idx.numel();
     if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0 || dirty_Ak <= 0) return;
     int Ngy = (int)gy.numel(), Ngz = (int)gz.numel();
+    // A size<=1 tensor is the caller's "owner field not wanted" placeholder.
+    int32_t* owner_ptr = (owner_cc.numel() > 1) ? owner_cc.data_ptr<int32_t>()
+                                                : nullptr;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_3d_resolve_cpu", [&] {
         // Min-stage
@@ -413,6 +428,7 @@ void streaming_sdf_stag_3d_resolve_cpu(
             priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(), priv_body_w.data_ptr<scalar_t>(),
             sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(), sdf_v.data_ptr<scalar_t>(), sdf_w.data_ptr<scalar_t>(),
             body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(), body_w.data_ptr<scalar_t>(),
+            owner_ptr,
             (scalar_t)blend_eps);
     });
 }

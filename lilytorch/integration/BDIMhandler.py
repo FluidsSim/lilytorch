@@ -1735,7 +1735,17 @@ class BDIMhandler:
 
         # Reset running-min CC SDF in the dirty sub-block (O(dirty_vol)).
         comp._sdf_sparse = [None] * B
-        comp.sdf_val[tuple(slice(d_lo[ax], d_hi[ax]) for ax in range(D))].fill_(_FAR)
+        _dsl = tuple(slice(d_lo[ax], d_hi[ax]) for ax in range(D))
+        comp.sdf_val[_dsl].fill_(_FAR)
+        # owner_cc rides the SAME reset: the resolve kernel writes it exactly
+        # where it writes sdf_val, so outside the dirty block both keep the
+        # previous step's (still valid) values, and inside it both are rebuilt
+        # from scratch.  -1 = cell covered by no body.
+        if getattr(comp, 'owner_cc', None) is None:
+            comp.owner_cc = torch.full(comp.sdf_val.shape, -1,
+                                       dtype=torch.int32, device=self.device)
+        else:
+            comp.owner_cc[_dsl].fill_(-1)
 
         # ---- assemble per-step kin on the host ----
         # Layout: [R^T (D*D) | body_pos (D) | com_pos (D) | lin_vel (D) | ang (3|1)].
@@ -1923,6 +1933,7 @@ class BDIMhandler:
                 int(kstep['dirty_Ai']), int(kstep['dirty_Aj']),
                 blend_eps=float(blend_eps),
                 active_idx=kstep['active_np'],
+                owner_cc=getattr(comp, 'owner_cc', None),
             )
         else:
             body_update_3d(
@@ -1940,6 +1951,7 @@ class BDIMhandler:
                 int(kstep['dirty_Ak']),
                 blend_eps=float(blend_eps),
                 active_idx=kstep['active_np'],
+                owner_cc=getattr(comp, 'owner_cc', None),
             )
 
         # ---- publish the solver contract fields ----

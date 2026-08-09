@@ -306,6 +306,9 @@ def forces_method2(self, u, v, p, iteration):
         self.force_delta_order,
         out2d,
         _fsm, _ph_tau,
+        # See the 3-D twin: the resolve kernel's winner field, or None on the
+        # analytical body path (kernel then recomputes the argmin).
+        getattr(comp, 'owner_cc', None),
     )
 
     out_s = out2d if out2d.dtype == u.dtype else out2d.to(u.dtype)
@@ -412,6 +415,10 @@ def forces_method2_3d(self, u, v, w, p, iteration):
         self._cached_float('h3', self.h3),
         self.force_delta_order, out,
         _fsm, _ph_tau,
+        # The winner field the streaming resolve kernel published this step.
+        # Absent on the analytical body path, where the kernel falls back to
+        # recomputing the argmin per (body, cell).
+        getattr(comp, 'owner_cc', None),
     )
     out_s = out if out.dtype == u.dtype else out.to(u.dtype)
     self.viscous_drag_record[:B, :, iteration]    = out_s[:, 0:3]
