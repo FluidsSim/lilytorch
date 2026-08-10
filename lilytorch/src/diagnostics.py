@@ -23,6 +23,56 @@ class FlowDiagnostics:
     and CFL number.  Records scalar time-series and optionally warns when
     energy grows beyond a user-specified factor of its initial value.
 
+    Recorded quantities
+    -------------------
+    Each is a length-``nt`` series written to ``diagnostics.h5``, NaN in the
+    steps that ``check_every`` skipped.  ``h`` is the (uniform) grid spacing
+    and ``h^d`` the cell volume.
+
+    ``kinetic_energy``
+        ``E_k = 0.5 * h^d * sum(u^2 + v^2 [+ w^2])`` over the whole grid.
+
+    ``dissipation_rate``
+        Viscous dissipation rate ``eps = nu * h^d * sum(mu0 * |S|^2)`` with
+        ``|S| = sqrt(2 S_ij S_ij)``, so ``|S|^2 = 2 S:S``.  The dissipation
+        density is ``Phi = 2 mu S:S = rho nu |S|^2``.  ``mu0`` is the BDIM
+        solid mask, which zeroes the body interior so the immersed band does
+        not contaminate the integral.
+
+    ``dissipation_rate_unmasked``
+        The same integral over the *whole* grid, body interior and transition
+        band included.  Equals ``dissipation_rate`` when no mask is applied;
+        otherwise it bounds the boundary-layer dissipation the mask clips.
+
+    ``enstrophy``
+        ``Z = 0.5 * h^d * sum(omega^2)``.
+
+    ``cfl_number``, ``max_divergence``, ``max_divergence_fluid``,
+    ``poisson_residual``, ``poisson_iters``
+        Stability and solver-convergence monitors; see the comments at their
+        assignments.  Judge stability on ``cfl_number``.
+
+    .. warning::
+
+       ``kinetic_energy``, ``dissipation_rate`` and
+       ``dissipation_rate_unmasked`` are stored **per unit density** — the
+       ``rho`` factor is deliberately left out so the series are independent
+       of the fluid density setting.  Multiply by ``rho`` downstream to get
+       joules and watts.  Reading them as SI without that factor understates
+       every energy by 1000x in water.
+
+    Energy balance
+    --------------
+    For a body moving in the fluid the budget is
+
+    ``dE_k/dt = P(body -> fluid) - dissipation_rate``
+
+    so the mechanical power the body delivers is
+    ``P = dE_k/dt + dissipation_rate``.  Only in a statistically steady state
+    does ``dE_k/dt`` average to zero and dissipation alone account for the
+    power; while a swimmer is still accelerating the wake term is a
+    first-order part of the budget, not a correction.
+
     Parameters
     ----------
     nt : int
@@ -58,15 +108,10 @@ class FlowDiagnostics:
         self.enstrophy      = torch.full((nt,), float('nan'), device=device, dtype=dtype)
         self.max_divergence  = torch.full((nt,), float('nan'), device=device, dtype=dtype)
         self.cfl_number      = torch.full((nt,), float('nan'), device=device, dtype=dtype)
-        # Viscous dissipation *rate* (per unit density): nu * h^d * Σ(mu0·|S|²),
-        # |S| = sqrt(2 S_ij S_ij).  Multiply by rho for watts, integrate over
-        # time for the energy irreversibly lost to the fluid.  mu0 masks the
-        # solid interior so the BDIM band does not contaminate the integral.
+        # Viscous dissipation rate, mu0-masked and unmasked.  Both per unit
+        # density -- see "Recorded quantities" in the class docstring for the
+        # integrals and the rho convention.
         self.dissipation_rate = torch.full((nt,), float('nan'), device=device, dtype=dtype)
-        # Unmasked counterpart: ν·h^d·Σ|S|² integrated over the *whole* grid
-        # (body interior + transition band included).  Captures any boundary-layer
-        # dissipation that the mu0 mask clips; equals dissipation_rate when no
-        # mask is applied.  Useful as an upper bound for the energy-balance check.
         self.dissipation_rate_unmasked = torch.full((nt,), float('nan'), device=device, dtype=dtype)
         # Pressure-Poisson convergence.  ``poisson_residual`` is the L-inf
         # residual the solve stopped at; compare it against poisson_tol to see
