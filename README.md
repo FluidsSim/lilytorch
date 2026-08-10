@@ -1,4 +1,4 @@
-LilyTorch
+# LilyTorch
 
 LilyTorch is a PyTorch-based 2-D/3-D incompressible-flow solver for
 fluid–structure interaction. It combines a Cartesian MAC grid, BDIM2 immersed
@@ -18,14 +18,14 @@ repository. This repository intentionally does not duplicate those pages.
 
 **Boat**
 
-<video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" width="100%" height="240" controls muted></video>
 
 </td>
 <td width="50%">
 
 **Submarine**
 
-<video src="https://github.com/user-attachments/assets/2f4ddde8-4d87-49ed-954d-24a5cabd732b" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/2f4ddde8-4d87-49ed-954d-24a5cabd732b" width="100%" height="240" controls muted></video>
 
 </td>
 </tr>
@@ -34,14 +34,14 @@ repository. This repository intentionally does not duplicate those pages.
 
 **Salamander — swimming 2d**
 
-<video src="https://github.com/user-attachments/assets/95f012d1-1b49-4c24-a9ae-dc4e41c26db8" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/95f012d1-1b49-4c24-a9ae-dc4e41c26db8" width="100%" height="240" controls muted></video>
 
 </td>
 <td width="50%">
 
 **Zebrafish — 3-D, vorticity magnitude**
 
-<video src="https://github.com/user-attachments/assets/d2998e68-b97c-45b0-9c7e-e9cd7db5cb7e" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/d2998e68-b97c-45b0-9c7e-e9cd7db5cb7e" width="100%" height="240" controls muted></video>
 
 </td>
 </tr>
@@ -50,14 +50,14 @@ repository. This repository intentionally does not duplicate those pages.
 
 **Three spheres VOF**
 
-<video src="https://github.com/user-attachments/assets/a4f9c598-ad5d-401d-8b3f-7abf634adfc4" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/a4f9c598-ad5d-401d-8b3f-7abf634adfc4" width="100%" height="240" controls muted></video>
 
 </td>
 <td width="50%">
 
 **1guilla robot surface swimming**
 
-<video src="https://github.com/user-attachments/assets/de08af64-c821-40f0-a54a-7bc89bf82886" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/de08af64-c821-40f0-a54a-7bc89bf82886" width="100%" height="240" controls muted></video>
 
 </td>
 </tr>
@@ -66,13 +66,13 @@ repository. This repository intentionally does not duplicate those pages.
 
 ## Validation with robot experiments
 
-### 1guilla in water - Rofamine dye - Re~160000
+### 1guilla in water - Rhodamine dye - Re~160000
 
-<video src="https://github.com/user-attachments/assets/71332af2-63d4-4604-8bd4-fbdac16104ec" controls muted loop></video>
+<video src="https://github.com/user-attachments/assets/71332af2-63d4-4604-8bd4-fbdac16104ec" width="100%" height="600" controls muted></video>
 
 ### 1guilla in carboxymethyl cellulose and water thick solution - Fluorescein dye - Re~100
 
-<video src="https://github.com/user-attachments/assets/88a075d3-9c22-4f99-a7d5-cf6ff57be1ad" controls muted loop></video>
+<video src="https://github.com/user-attachments/assets/88a075d3-9c22-4f99-a7d5-cf6ff57be1ad" width="100%" height="600" controls muted></video>
 
 
 ## Installation
