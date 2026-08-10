@@ -14,14 +14,14 @@ repository. This repository intentionally does not duplicate those pages.
 
 <table>
 <tr>
-<td width="50%">
+<td width="70%">
 
 **Boat**
 
 <video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" width="100%" controls muted></video>
 
 </td>
-<td width="50%">
+<td width="70%">
 
 **Submarine**
 
@@ -30,14 +30,14 @@ repository. This repository intentionally does not duplicate those pages.
 </td>
 </tr>
 <tr>
-<td width="50%">
+<td width="70%">
 
 **Salamander — swimming 2d**
 
 <video src="https://github.com/user-attachments/assets/95f012d1-1b49-4c24-a9ae-dc4e41c26db8" width="100%" controls muted></video>
 
 </td>
-<td width="50%">
+<td width="70%">
 
 **Zebrafish — 3-D, vorticity magnitude**
 
@@ -46,14 +46,14 @@ repository. This repository intentionally does not duplicate those pages.
 </td>
 </tr>
 <tr>
-<td width="50%">
+<td width="70%">
 
 **Three spheres VOF**
 
 <video src="https://github.com/user-attachments/assets/a4f9c598-ad5d-401d-8b3f-7abf634adfc4" width="100%" controls muted></video>
 
 </td>
-<td width="50%">
+<td width="70%">
 
 **1guilla robot surface swimming**
 
@@ -63,13 +63,8 @@ repository. This repository intentionally does not duplicate those pages.
 </tr>
 </table>
 
-## Examples
 
-<table>
-<tr>
-<td width="50%">
-
-## Examples
+## Validation with robot experiments
 
 <table>
 <tr>
@@ -77,7 +72,11 @@ repository. This repository intentionally does not duplicate those pages.
 
 ### Boat
 
-<video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" controls muted loop></video>
+<video src="https://github.com/user-attachments/assets/71332af2-63d4-4604-8bd4-fbdac16104ec" controls muted loop></video>
+
+### Boat
+
+<video src="https://github.com/user-attachments/assets/88a075d3-9c22-4f99-a7d5-cf6ff57be1ad" controls muted loop></video>
 
 ## Related repositories
 
