@@ -1,9 +1,15 @@
+"""Build the native extension.
+
+Every piece of static metadata -- name, version, authors, dependencies,
+packages -- lives in ``pyproject.toml``.  This file exists only for what
+declarative metadata cannot express: compiling ``lilytorch.src._C`` against the
+PyTorch installation that will be used at runtime.
+"""
 
 import glob
 import os
 
-from setuptools import setup, find_packages
-import numpy as np
+from setuptools import setup
 
 
 def _kernel_extensions():
@@ -111,18 +117,6 @@ def _cmdclass():
 
 
 setup(
-    name="lilytorch",
-    version="0.1.0",
-    author="Andrea Ferrario",
-    author_email="ferrarioa5@gmail.com",
-    description="GPU-accelerated CFD with immersed-boundary methods, built on PyTorch",
-    long_description=open("README.md").read(),
-    long_description_content_type="text/markdown",
-    packages=find_packages(),
-    include_package_data=True,
-    include_dirs=[np.get_include(), "lilytorch"],
-    python_requires=">=3.9",
-    zip_safe=False,
     ext_modules=_kernel_extensions(),
     cmdclass=_cmdclass(),
 )

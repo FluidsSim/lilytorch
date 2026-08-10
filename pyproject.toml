@@ -2,7 +2,6 @@
 requires = [
     "setuptools",
     "torch",
-    "numpy",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -56,5 +55,9 @@ petsc = ["petsc4py", "mpi4py"]
 [project.urls]
 Repository = "https://github.com/FluidsSim/lilytorch"
 
+[tool.setuptools]
+include-package-data = true
+zip-safe = false
+
 [tool.setuptools.packages.find]
-include = ["lilytorch*"]
+include = ["lilytorch", "lilytorch.src", "lilytorch.integration", "lilytorch.util"]

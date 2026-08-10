@@ -12,7 +12,6 @@ opencv-python
 trimesh
 open3d
 scikit-fmm
-pytorch_interpolation @ git+https://github.com/ferrarioa5/pytorch_interpolation.git
 seaborn
 plotly
 scikit-learn
