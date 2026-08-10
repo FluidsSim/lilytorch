@@ -16,7 +16,7 @@ repository. This repository intentionally does not duplicate those pages.
 <tr>
 <td width="50%">
 
-**Boat — free surface**
+**Boat**
 
 <video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" width="100%" controls muted></video>
 
@@ -25,56 +25,55 @@ repository. This repository intentionally does not duplicate those pages.
 
 **Submarine**
 
-<video src="https://github.com/user-attachments/assets/PASTE-UUID-submarine" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/2f4ddde8-4d87-49ed-954d-24a5cabd732b" width="100%" controls muted></video>
 
 </td>
 </tr>
 <tr>
 <td width="50%">
 
-**Salamander — swimming**
+**Salamander — swimming 2d**
 
-<video src="https://github.com/user-attachments/assets/PASTE-UUID-salamander" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/95f012d1-1b49-4c24-a9ae-dc4e41c26db8" width="100%" controls muted></video>
 
 </td>
 <td width="50%">
 
 **Zebrafish — 3-D, vorticity magnitude**
 
-<video src="https://github.com/user-attachments/assets/PASTE-UUID-zebrafish" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/d2998e68-b97c-45b0-9c7e-e9cd7db5cb7e" width="100%" controls muted></video>
 
 </td>
 </tr>
 <tr>
 <td width="50%">
 
-**Flow past a cylinder — Re 800**
+**Three spheres VOF**
 
-<video src="https://github.com/user-attachments/assets/PASTE-UUID-cylinder" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/a4f9c598-ad5d-401d-8b3f-7abf634adfc4" width="100%" controls muted></video>
 
 </td>
 <td width="50%">
 
-**Rising spheres — two-phase VOF**
+**1guilla robot surface swimming**
 
-<video src="https://github.com/user-attachments/assets/PASTE-UUID-spheres" width="100%" controls muted></video>
+<video src="https://github.com/user-attachments/assets/de08af64-c821-40f0-a54a-7bc89bf82886" width="100%" controls muted></video>
 
 </td>
 </tr>
 </table>
 
+## Examples
 
-### Cylinder -
+<table>
+<tr>
+<td width="50%">
 
-<video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" controls muted loop></video>
+## Examples
 
-### Boat
-
-<video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" controls muted loop></video>
-
-### Boat
-
-<video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" controls muted loop></video>
+<table>
+<tr>
+<td width="50%">
 
 ### Boat
 
