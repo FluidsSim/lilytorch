@@ -43,6 +43,8 @@ repository. This repository intentionally does not duplicate those pages.
 
 <video src="https://github.com/user-attachments/assets/d2998e68-b97c-45b0-9c7e-e9cd7db5cb7e" width="100%" controls muted></video>
 
+</td>
+</tr>
 <tr>
 <td width="50%">
 
@@ -64,15 +66,11 @@ repository. This repository intentionally does not duplicate those pages.
 
 ## Validation with robot experiments
 
-<table>
-<tr>
-<td width="50%">
-
-### Rofamine dye in water - Re~160000
+### 1guilla in water - Rofamine dye - Re~160000
 
 <video src="https://github.com/user-attachments/assets/71332af2-63d4-4604-8bd4-fbdac16104ec" controls muted loop></video>
 
-### Boat in carboxymethyl cellulose and carboxymethyl cellulose solution - Re~100
+### 1guilla in carboxymethyl cellulose and water thick solution - Fluorescein dye - Re~100
 
 <video src="https://github.com/user-attachments/assets/88a075d3-9c22-4f99-a7d5-cf6ff57be1ad" controls muted loop></video>
 
