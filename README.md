@@ -43,8 +43,6 @@ repository. This repository intentionally does not duplicate those pages.
 
 <video src="https://github.com/user-attachments/assets/d2998e68-b97c-45b0-9c7e-e9cd7db5cb7e" width="100%" controls muted></video>
 
-</td>
-</tr>
 <tr>
 <td width="50%">
 
