@@ -12,7 +12,7 @@ repository. This repository intentionally does not duplicate those pages.
 
 ## Examples
 
-An set of examples will be soon made available. In the meantime, some simulation
+A set of examples will be made available soon. In the meantime, some simulation
 examples are shown below.
 
 <table>
