@@ -21,14 +21,14 @@ examples are shown below.
 
 **Boat**
 
-<video src="https://github.com/user-attachments/assets/36c3d06b-aced-45c4-a61c-3aaa5a3ddbad" width="100%" height="240" controls muted></video>
+<video src="https://github.com/user-attachments/assets/17bb9903-24f2-4fcc-b9a0-902438b45532" width="100%" height="240" controls muted></video>
 
 </td>
 <td width="50%">
 
 **Submarine**
 
-<video src="https://github.com/user-attachments/assets/2f4ddde8-4d87-49ed-954d-24a5cabd732b" width="100%" height="240" controls muted></video>
+<video src="https://github.com/user-attachments/assets/08432d15-f760-4b1d-b915-560fcba9c0c9" width="100%" height="240" controls muted></video>
 
 </td>
 </tr>
@@ -37,14 +37,14 @@ examples are shown below.
 
 **Salamander — swimming 2d**
 
-<video src="https://github.com/user-attachments/assets/95f012d1-1b49-4c24-a9ae-dc4e41c26db8" width="100%" height="240" controls muted></video>
+<video src="https://github.com/user-attachments/assets/084ad315-8eef-464e-81b1-3f94701fec6d" width="100%" height="240" controls muted></video>
 
 </td>
 <td width="50%">
 
 **Zebrafish — 3-D, vorticity magnitude**
 
-<video src="https://github.com/user-attachments/assets/d2998e68-b97c-45b0-9c7e-e9cd7db5cb7e" width="100%" height="240" controls muted></video>
+<video src="https://github.com/user-attachments/assets/42a7b2c2-9ab7-47a1-a856-ead4c0d7b4ad" width="100%" height="240" controls muted></video>
 
 </td>
 </tr>
@@ -53,14 +53,14 @@ examples are shown below.
 
 **Three spheres VOF**
 
-<video src="https://github.com/user-attachments/assets/a4f9c598-ad5d-401d-8b3f-7abf634adfc4" width="100%" height="240" controls muted></video>
+<video src="https://github.com/user-attachments/assets/d27171a0-7b02-47c4-9880-9b576819b01f" width="100%" height="240" controls muted></video>
 
 </td>
 <td width="50%">
 
 **1guilla robot surface swimming**
 
-<video src="https://github.com/user-attachments/assets/de08af64-c821-40f0-a54a-7bc89bf82886" width="100%" height="240" controls muted></video>
+<video src="https://github.com/user-attachments/assets/07853360-651a-40a6-ac67-5831b730a184" width="100%" height="240" controls muted></video>
 
 </td>
 </tr>
@@ -71,11 +71,11 @@ examples are shown below.
 
 ### 1guilla in water - Rhodamine dye - Re~160000
 
-<video src="https://github.com/user-attachments/assets/71332af2-63d4-4604-8bd4-fbdac16104ec" width="100%" height="600" controls muted></video>
+<video src="https://github.com/user-attachments/assets/e63b9f63-909f-403e-aa9d-8971d2530a16" width="100%" height="600" controls muted></video>
 
 ### 1guilla in carboxymethyl cellulose and water thick solution - Fluorescein dye - Re~100
 
-<video src="https://github.com/user-attachments/assets/88a075d3-9c22-4f99-a7d5-cf6ff57be1ad" width="100%" height="600" controls muted></video>
+<video src="https://github.com/user-attachments/assets/4bb6186a-d4f5-42d0-8f52-3dacf773cfbb" width="100%" height="600" controls muted></video>
 
 
 ## Installation
