@@ -21,7 +21,7 @@ examples are shown below.
 
 **Boat**
 
-<video src="https://github.com/user-attachments/assets/17bb9903-24f2-4fcc-b9a0-902438b45532" width="100%" height="240" controls muted></video>
+[![Boat simulation in LilyTorch — watch on YouTube](docs/media/boat_sim.jpg)](https://youtu.be/BuwlqcF3FKU)
 
 </td>
 <td width="50%">
