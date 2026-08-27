@@ -21,7 +21,9 @@ examples are shown below.
 
 **Boat**
 
-[![Boat simulation in LilyTorch — watch on YouTube](docs/media/boat_sim.jpg)](https://youtu.be/BuwlqcF3FKU)
+<video src="https://github.com/user-attachments/assets/17bb9903-24f2-4fcc-b9a0-902438b45532" width="100%" height="240" controls muted></video>
+
+<sub>[▶ Also on YouTube](https://youtu.be/BuwlqcF3FKU)</sub>
 
 </td>
 <td width="50%">
@@ -29,6 +31,8 @@ examples are shown below.
 **Submarine**
 
 <video src="https://github.com/user-attachments/assets/08432d15-f760-4b1d-b915-560fcba9c0c9" width="100%" height="240" controls muted></video>
+
+<sub>[▶ Also on YouTube](https://youtu.be/TZnUeeh6IvQ)</sub>
 
 </td>
 </tr>
@@ -39,12 +43,16 @@ examples are shown below.
 
 <video src="https://github.com/user-attachments/assets/084ad315-8eef-464e-81b1-3f94701fec6d" width="100%" height="240" controls muted></video>
 
+<sub>[▶ Also on YouTube](https://youtu.be/LjBTwg80DzI)</sub>
+
 </td>
 <td width="50%">
 
 **Zebrafish — 3-D, vorticity magnitude**
 
 <video src="https://github.com/user-attachments/assets/42a7b2c2-9ab7-47a1-a856-ead4c0d7b4ad" width="100%" height="240" controls muted></video>
+
+<sub>[▶ Also on YouTube](https://youtu.be/qHh5nry3F-A)</sub>
 
 </td>
 </tr>
@@ -55,12 +63,16 @@ examples are shown below.
 
 <video src="https://github.com/user-attachments/assets/d27171a0-7b02-47c4-9880-9b576819b01f" width="100%" height="240" controls muted></video>
 
+<sub>[▶ Also on YouTube](https://youtu.be/kHZGqutqFUI)</sub>
+
 </td>
 <td width="50%">
 
 **1guilla robot surface swimming**
 
 <video src="https://github.com/user-attachments/assets/07853360-651a-40a6-ac67-5831b730a184" width="100%" height="240" controls muted></video>
+
+<sub>[▶ Also on YouTube](https://youtu.be/4YsMVhUbUNI)</sub>
 
 </td>
 </tr>
@@ -73,9 +85,13 @@ examples are shown below.
 
 <video src="https://github.com/user-attachments/assets/e63b9f63-909f-403e-aa9d-8971d2530a16" width="100%" height="600" controls muted></video>
 
+<sub>[▶ Also on YouTube](https://youtu.be/vxCyhAP2mQc)</sub>
+
 ### 1guilla in carboxymethyl cellulose and water thick solution - Fluorescein dye - Re~100
 
 <video src="https://github.com/user-attachments/assets/4bb6186a-d4f5-42d0-8f52-3dacf773cfbb" width="100%" height="600" controls muted></video>
+
+<sub>[▶ Also on YouTube](https://youtu.be/748NTNWLCEs)</sub>
 
 
 ## Installation
